@@ -1,1 +1,11 @@
-{"name":"Basketball Edge Analyst v20 Mobile","short_name":"Basketball Edge","start_url":"./index.html","display":"standalone","background_color":"#0b1220","theme_color":"#101827","description":"Interfaz móvil local para gestionar datasets y pronósticos de Basketball Edge Analyst v20","icons":[]}
+{
+  "name": "Basketball Edge Analyst v20",
+  "short_name": "Basketball Edge",
+  "description": "Interfaz móvil conectada al motor Python para simulaciones exploratorias.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#0b1220",
+  "theme_color": "#101827",
+  "lang": "es"
+}
