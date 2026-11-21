@@ -93,6 +93,20 @@
         <div class="actions"><button class="action" id="sportapi-import" type="button">Importar datos de SportAPI.ai</button></div>
         <div id="sportapi-result" class="small"></div>
       </div>
+
+      <div class="panel"><h2>Combinada automática · todas las ligas de básquet disponibles</h2>
+        <p class="small">Busca partidos con cuotas en más de 100 competiciones, analiza solo equipos con al menos 8 partidos históricos completos importados y compara el modelo con las probabilidades del mercado. La clave de cuotas se guarda en Render, no en este iPhone.</p>
+        <p class="small"><a href="https://hoopsapi.com/sign-up" target="_blank" rel="noopener noreferrer">Crear clave gratuita de HoopsAPI</a> · El plan gratuito publica 10 consultas por día.</p>
+        <div id="hoopsapi-status" class="fileline" aria-live="polite">Comprobando configuración de cuotas…</div>
+        <div class="grid">
+          <div><label for="parlay-start">Desde (hora local)</label><input id="parlay-start" type="datetime-local" required></div>
+          <div><label for="parlay-end">Hasta (hora local)</label><input id="parlay-end" type="datetime-local" required></div>
+        </div>
+        <label for="parlay-target">Cuota total objetivo</label><input id="parlay-target" type="number" min="1.01" max="100" step="0.01" value="4.00" required>
+        <div class="actions"><button class="action secondary" type="button" id="check-hoopsapi">Comprobar configuración</button><button class="action" type="button" id="build-parlay">Buscar mejores picks y armar combinada</button></div>
+        <div id="parlay-message" class="fileline" aria-live="polite"></div>
+        <div id="parlay-result"></div>
+      </div>
       <div class="panel"><h2>Simular un partido</h2><p class="small">Necesitás importar partidos finalizados y estadísticas de ambos equipos en la pestaña Datos CSV. El análisis utiliza el mismo ámbito exacto de competición y temporada.</p>
         <form id="analysis-form">
           <label for="analysis-competition">Competición (debe coincidir exactamente con el CSV)</label><input id="analysis-competition" required placeholder="Ej.: NBA">
@@ -225,6 +239,97 @@ document.getElementById('sportapi-import').addEventListener('click',async()=>{
     await refresh();
     output.textContent='Importado: '+data.games_received+' partidos; '+data.team_stats_rows+' registros de equipos; '+data.player_stats_rows+' registros de jugadores. '+(data.warnings||[]).join(' ');
   }catch(error){output.textContent='Error: '+error.message;}
+});
+
+
+const hoopsStatus=document.getElementById('hoopsapi-status');
+const parlayMessage=document.getElementById('parlay-message');
+const parlayResult=document.getElementById('parlay-result');
+let lastRecommendation=null;
+document.getElementById('parlay-start').value=localDateTimeValue(new Date());
+document.getElementById('parlay-end').value=localDateTimeValue(new Date(Date.now()+24*60*60*1000));
+function pct(value){return (Number(value||0)*100).toLocaleString('es-AR',{maximumFractionDigits:1})+'%';}
+function parlayCandidateHtml(c,index){
+ const kickoff=new Date(c.start_time).toLocaleString('es-AR',{dateStyle:'short',timeStyle:'short'});
+ return '<article class="record"><strong>'+safe(c.game)+'</strong>'+
+ '<p>'+safe(c.competition)+' · '+kickoff+'</p>'+
+ '<p><strong>'+safe(c.market_label)+' · '+safe(c.selection)+'</strong></p>'+
+ '<p>Cuota '+Number(c.odds).toFixed(2)+' · '+safe(c.bookmaker)+' · Probabilidad estimada ajustada '+pct(c.probability)+'</p>'+
+ '<p>Mercado sin margen '+pct(c.market_probability)+' · Diferencia '+Number(c.edge_percentage_points).toFixed(1)+' puntos · EV teórico '+Number(c.expected_value_per_unit).toFixed(3)+'</p>'+
+ '<p>Muestra: '+c.home_history_games+'/'+c.away_history_games+' partidos · Cuotas capturadas: '+safe(c.odds_captured_at)+'</p>'+
+ '<button class="action secondary" type="button" data-save-index="'+index+'">Guardar este pick</button></article>';
+}
+async function checkHoopsApi(){
+ try{
+  hoopsStatus.textContent='Comprobando configuración…';
+  const base=apiBase();const response=await fetch(base+'/api/hoopsapi/status',{cache:'no-store'});
+  const data=await response.json();if(!response.ok)throw new Error(data.detail||('HTTP '+response.status));
+  hoopsStatus.textContent=data.configured?'Clave HOOPSAPI_KEY encontrada en Render. La validez se comprueba al consultar las cuotas.':'Falta HOOPSAPI_KEY en Render. Creá una clave gratuita en HoopsAPI y agregala como variable secreta en el servicio.';
+ }catch(error){hoopsStatus.textContent='No se pudo comprobar: '+error.message;}
+}
+document.getElementById('check-hoopsapi').addEventListener('click',checkHoopsApi);
+checkHoopsApi();
+document.getElementById('build-parlay').addEventListener('click',async()=>{
+ const button=document.getElementById('build-parlay');
+ try{
+  const start=document.getElementById('parlay-start').value,end=document.getElementById('parlay-end').value;
+  const target=Number(document.getElementById('parlay-target').value);
+  if(!start||!end)throw new Error('Indicá el horario desde y hasta.');
+  if(!(target>1.01&&target<=100))throw new Error('La cuota objetivo debe estar entre 1,01 y 100.');
+  const base=apiBase();localStorage.setItem('bea-v20-api-url',base);
+  button.disabled=true;button.textContent='Analizando partidos…';parlayResult.innerHTML='';
+  const records=await allRecords();
+  const games=records.filter(r=>r.kind==='dataset'&&r.type==='games').map(r=>r.data);
+  const teamStats=records.filter(r=>r.kind==='dataset'&&r.type==='team_stats').map(r=>r.data);
+  if(!games.length||!teamStats.length)throw new Error('Primero importá historial y estadísticas de equipos desde SportAPI.ai.');
+  parlayMessage.textContent='Enviando '+games.length+' partidos históricos y '+teamStats.length+' registros de equipo. Consultando cuotas…';
+  const response=await fetch(base+'/api/parlay/recommend',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+   window_start:new Date(start).toISOString(),window_end:new Date(end).toISOString(),target_odds:target,
+   simulations:10000,minimum_history_games:8,games:games,team_stats:teamStats
+  })});
+  let data;try{data=await response.json();}catch(_){throw new Error('El servidor devolvió una respuesta no válida.');}
+  if(!response.ok)throw new Error(data.detail||('HTTP '+response.status));
+  lastRecommendation=data;
+  const stats='<p>Partidos en el horario: '+data.matches_in_window+' · Analizados: '+data.matches_analysed+' · Mercados elegibles: '+data.eligible_market_selections+'</p>';
+  const skips=data.skipped&&Object.keys(data.skipped).length?'<p class="small">No analizados: '+Object.entries(data.skipped).map(([k,v])=>safe(k)+' ('+v+')').join(' · ')+'</p>':'';
+  let body='<div class="panel"><div class="row"><h3>Resultado de búsqueda</h3><span class="pill">'+safe(data.status)+'</span></div>'+stats+skips;
+  if(data.top_picks&&data.top_picks.length){
+   body+='<h3>Mejores picks individuales encontrados</h3>'+data.top_picks.slice(0,8).map((c,i)=>parlayCandidateHtml(c,i)).join('');
+  }else{
+   body+='<p class="notice">No se encontró un pick con ventaja estimada positiva y cuotas recientes. No se fuerza una recomendación.</p>';
+  }
+  if(data.best_parlay){
+   body+='<hr style="border-color:var(--line);border-width:1px 0 0;margin:14px 0"><h3>Combinada propuesta</h3>'+
+    '<p><strong>Operador:</strong> '+safe(data.best_parlay.bookmaker)+'</p>'+
+    '<p><strong>Cuota combinada:</strong> '+Number(data.best_parlay.combined_odds).toFixed(2)+' · <strong>Probabilidad estimada:</strong> '+pct(data.best_parlay.estimated_hit_probability)+'</p>'+
+    data.best_parlay.legs.map((c,i)=>'<article class="record"><strong>'+safe(c.game)+'</strong><p>'+safe(c.competition)+' · '+safe(c.market_label)+' · '+safe(c.selection)+'</p><p>Cuota '+Number(c.odds).toFixed(2)+' · '+safe(c.bookmaker)+' · Probabilidad '+pct(c.probability)+'</p></article>').join('')+
+    '<button class="action" type="button" data-save-combo="1">Guardar las piernas de la combinada</button>';
+  }else{
+   body+='<p class="notice">No se pudo alcanzar la cuota objetivo con selecciones que superaran el filtro de valor y estuvieran disponibles en un mismo operador.</p>';
+  }
+  body+='<h3>Advertencias del análisis</h3><ul>'+(data.warnings||[]).map(w=>'<li class="small">'+safe(w)+'</li>').join('')+'</ul></div>';
+  parlayResult.innerHTML=body;
+  parlayMessage.textContent='Análisis terminado. Se revisaron hasta '+data.matches_scanned+' partidos de la ventana horaria.';
+ }catch(error){parlayMessage.textContent='No se pudo armar la combinada: '+error.message;}
+ finally{button.disabled=false;button.textContent='Buscar mejores picks y armar combinada';}
+});
+parlayResult.addEventListener('click',async event=>{
+ const saveIndex=event.target.dataset.saveIndex;
+ const saveCombo=event.target.dataset.saveCombo;
+ if(!lastRecommendation)return;
+ let selections=[];
+ if(saveCombo==='1'&&lastRecommendation.best_parlay)selections=lastRecommendation.best_parlay.legs;
+ else if(saveIndex!==undefined&&lastRecommendation.top_picks[Number(saveIndex)])selections=[lastRecommendation.top_picks[Number(saveIndex)]];
+ if(!selections.length)return;
+ for(const c of selections){
+  const key='pick:'+Date.now()+':'+Math.random().toString(36).slice(2,7);
+  await putRecord({key,kind:'pick',event:c.game,competition:c.competition+' / '+c.season,market:c.market_label,selection:c.selection,
+   odds:String(c.odds),probability:String((c.probability*100).toFixed(1)),decision:'exploratory',
+   notes:'Operador: '+c.bookmaker+' · Diferencia de mercado: '+c.edge_percentage_points.toFixed(1)+' pp · EXPLORATORY_NOT_VALIDATED',
+   outcome:'pending',created:Date.now()});
+ }
+ await refresh();
+ parlayMessage.textContent='Se guardaron '+selections.length+' picks en el historial local.';
 });
 
 const marketSelect=document.getElementById('analysis-market');
