@@ -488,10 +488,22 @@ def _history_scope_for_fixture(fixture: dict[str, Any], all_games: list[dict], a
         team_lookup.setdefault(_normalise_label(home_name), home_name)
         team_lookup.setdefault(_normalise_label(away_name), away_name)
 
-    home = team_lookup.get(_normalise_label(fixture.get("home")))
-    away = team_lookup.get(_normalise_label(fixture.get("away")))
+    fixture_home_name = str(fixture.get("home") or "").strip()
+    fixture_away_name = str(fixture.get("away") or "").strip()
+    home = team_lookup.get(_normalise_label(fixture_home_name))
+    away = team_lookup.get(_normalise_label(fixture_away_name))
     if not home or not away or home == away:
-        raise ValueError("fixture_team_names_do_not_match_imported_history")
+        imported_team_names = sorted({
+            str(name).strip()
+            for row in scoped_games
+            for name in (row.get("home_team"), row.get("away_team"))
+            if str(name or "").strip()
+        })
+        raise ValueError(
+            "fixture_team_names_do_not_match_imported_history:"
+            f"fixture_home={fixture_home_name!r}:fixture_away={fixture_away_name!r}:"
+            f"imported_team_names={imported_team_names[:40]!r}"
+        )
 
     scoped_ids = set(event_teams)
     scoped_stats = []
@@ -753,6 +765,7 @@ async def recommend_parlay(request: Request):
         all_candidates = []
         skipped: dict[str, int] = {}
         history_skip_examples: list[str] = []
+        team_name_skip_examples: list[str] = []
         analysed = 0
         for fixture in scan_games:
             if not fixture.get("home") or not fixture.get("away"):
@@ -773,6 +786,8 @@ async def recommend_parlay(request: Request):
                 skipped[key] = skipped.get(key, 0) + 1
                 if key == "no_imported_history_for_competition_before_fixture" and len(history_skip_examples) < 5:
                     history_skip_examples.append(detail)
+                if key == "fixture_team_names_do_not_match_imported_history" and len(team_name_skip_examples) < 5:
+                    team_name_skip_examples.append(detail)
             except Exception:
                 skipped["analysis_error"] = skipped.get("analysis_error", 0) + 1
 
@@ -858,6 +873,7 @@ async def recommend_parlay(request: Request):
             })[:40],
             "skipped": skipped,
             "history_skip_examples": history_skip_examples,
+            "team_name_skip_examples": team_name_skip_examples,
             "eligible_market_selections": len(all_candidates),
             "top_picks": top_picks,
             "best_parlay": best_parlay,
