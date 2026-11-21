@@ -1,6 +1,7 @@
 """Adapter for SportAPI.ai basketball endpoints."""
 from __future__ import annotations
 import json, os, re, threading, time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
@@ -88,6 +89,50 @@ def _player_rows(eid,items,team):
             "fg3m":_num(item.get("tpm")),"fta":_num(item.get("fta")),"ftm":_num(item.get("ftm"))})
     return rows
 
+def _fetch_game_boxscore(g):
+    """Fetch one game's team and player box scores; keep team stats if player data fails."""
+    gid = g.get("id")
+    home = g.get("home") or {}
+    away = g.get("away") or {}
+    eid = "sportapi-" + str(gid)
+    team_rows, player_rows, warnings = [], [], []
+    quota = None
+    rate_limited = False
+
+    try:
+        details = _get("basketball/games/" + str(int(gid)), ttl=3600)
+        detail = details.get("data") or details.get("game") or {}
+        stats = detail.get("stats") or details.get("stats") or {}
+        quota = details.get("_quota")
+        if isinstance(stats, dict):
+            for side, team in (("home", home), ("away", away)):
+                row_stats = stats.get(side)
+                if isinstance(row_stats, dict) and team.get("name"):
+                    row = _team_row(eid, str(team["name"]), team.get("score"), row_stats)
+                    if row:
+                        team_rows.append(row)
+    except SportAPIError as exc:
+        warnings.append(str(exc))
+        rate_limited = exc.status == 429
+        return team_rows, player_rows, quota, warnings, rate_limited
+    except (TypeError, ValueError):
+        warnings.append("No se pudieron interpretar las estadísticas de equipo de un partido.")
+        return team_rows, player_rows, quota, warnings, rate_limited
+
+    try:
+        players = _get("basketball/games/" + str(int(gid)) + "/players", ttl=3600)
+        quota = players.get("_quota") or quota
+        player_data = players.get("data") or {}
+        if isinstance(player_data, dict):
+            player_rows.extend(_player_rows(eid, player_data.get("home"), str(home["name"])))
+            player_rows.extend(_player_rows(eid, player_data.get("away"), str(away["name"])))
+    except SportAPIError as exc:
+        warnings.append(str(exc))
+        rate_limited = exc.status == 429
+
+    return team_rows, player_rows, quota, warnings, rate_limited
+
+
 def sync(league,season=None,date=None,limit=20):
     league=str(league or "").strip()
     if not re.fullmatch(r"[A-Za-z0-9-]{1,80}",league): raise SportAPIError("Seleccioná una competición válida.",422)
@@ -112,43 +157,78 @@ def sync(league,season=None,date=None,limit=20):
         if season and not date and str(g.get("season") or "")!=season: continue
         finals.append(g)
         if len(finals)>=limit: break
-    games,team_stats,player_stats=[],[],[]
-    warnings=[]; completed=0; quota=listing.get("_quota")
+
+    games, team_stats, player_stats = [], [], []
+    warnings = []
+    completed = 0
+    quota = listing.get("_quota")
+    boxscore_games = []
+
     for g in finals:
-        gid=g.get("id"); home=g.get("home") or {}; away=g.get("away") or {}; lg=g.get("league") or {}
+        gid = g.get("id")
+        home = g.get("home") or {}
+        away = g.get("away") or {}
+        lg = g.get("league") or {}
         if gid is None or not home.get("name") or not away.get("name") or not g.get("start"):
-            warnings.append("Se omitió un partido con campos básicos incompletos."); continue
-        eid="sportapi-"+str(gid)
-        games.append({"event_id":eid,"competition":str(lg.get("name") or league),
-            "season":str(g.get("season") or season or ""),"event_time":str(g.get("start")),
-            "home_team":str(home["name"]),"away_team":str(away["name"]),"status":"finished",
-            "home_score":home.get("score"),"away_score":away.get("score")})
-        completed+=1
+            warnings.append("Se omitió un partido con campos básicos incompletos.")
+            continue
+        eid = "sportapi-" + str(gid)
+        games.append({
+            "event_id": eid,
+            "competition": str(lg.get("name") or league),
+            "season": str(g.get("season") or season or ""),
+            "event_time": str(g.get("start")),
+            "home_team": str(home["name"]),
+            "away_team": str(away["name"]),
+            "status": "finished",
+            "home_score": home.get("score"),
+            "away_score": away.get("score"),
+        })
+        completed += 1
         if g.get("has_boxscore") is False:
-            warnings.append("Algunos partidos no tienen box score; se importó solo el resultado."); continue
-        try:
-            details=_get("basketball/games/"+str(int(gid)),ttl=3600)
-            detail=details.get("data") or details.get("game") or {}
-            stats=detail.get("stats") or details.get("stats") or {}
-            quota=details.get("_quota") or quota
-            for side,team in (("home",home),("away",away)):
-                s=stats.get(side) if isinstance(stats,dict) else None
-                if isinstance(s,dict):
-                    row=_team_row(eid,str(team["name"]),team.get("score"),s)
-                    if row: team_stats.append(row)
-            players=_get("basketball/games/"+str(int(gid))+"/players",ttl=3600)
-            quota=players.get("_quota") or quota
-            player_data=players.get("data") or {}
-            player_stats.extend(_player_rows(eid,player_data.get("home"),str(home["name"])))
-            player_stats.extend(_player_rows(eid,player_data.get("away"),str(away["name"])))
-        except SportAPIError as exc:
-            warnings.append(str(exc))
-            if exc.status==429: break
-    if not team_stats: warnings.append("No se recibieron estadísticas de equipo completas para estimar posesiones.")
-    if not player_stats: warnings.append("No se recibieron estadísticas individuales disponibles en esta importación.")
-    warnings.extend(["Las posesiones se estiman con FGA + 0,44 × FTA − rebotes ofensivos + pérdidas.",
+            warnings.append("Algunos partidos no tienen box score; se importó solo el resultado.")
+        else:
+            boxscore_games.append(g)
+
+    # Bounded concurrency keeps a 200-game import within the web-service request window.
+    # Process in small batches so a provider 429 stops subsequent requests promptly.
+    rate_limited = False
+    batch_size = 8
+    for offset in range(0, len(boxscore_games), batch_size):
+        batch = boxscore_games[offset:offset + batch_size]
+        with ThreadPoolExecutor(max_workers=min(batch_size, len(batch))) as executor:
+            futures = [executor.submit(_fetch_game_boxscore, game) for game in batch]
+            for future in as_completed(futures):
+                try:
+                    team_rows, player_rows, used_quota, game_warnings, hit_limit = future.result()
+                    team_stats.extend(team_rows)
+                    player_stats.extend(player_rows)
+                    quota = used_quota or quota
+                    warnings.extend(game_warnings)
+                    rate_limited = rate_limited or hit_limit
+                except Exception:
+                    warnings.append("No se pudieron descargar las estadísticas de un partido.")
+        if rate_limited:
+            warnings.append("La importación se detuvo al alcanzar el límite de solicitudes de SportAPI.ai.")
+            break
+
+    if not team_stats:
+        warnings.append("No se recibieron estadísticas de equipo completas para estimar posesiones.")
+    if not player_stats:
+        warnings.append("No se recibieron estadísticas individuales disponibles en esta importación.")
+    warnings.extend([
+        "Las posesiones se estiman con FGA + 0,44 × FTA − rebotes ofensivos + pérdidas.",
         "La cobertura de box scores varía por competición y partido; no se inventan datos ausentes.",
-        "SportAPI.ai no ofrece cuotas de apuestas."])
-    return {"games":games,"team_stats":team_stats,"player_stats":player_stats,
-        "games_received":len(games),"completed_games":completed,"team_stats_rows":len(team_stats),
-        "player_stats_rows":len(player_stats),"quota":quota,"warnings":list(dict.fromkeys(warnings))}
+        "SportAPI.ai no ofrece cuotas de apuestas.",
+    ])
+    return {
+        "games": games,
+        "team_stats": team_stats,
+        "player_stats": player_stats,
+        "games_received": len(games),
+        "completed_games": completed,
+        "team_stats_rows": len(team_stats),
+        "player_stats_rows": len(player_stats),
+        "quota": quota,
+        "warnings": list(dict.fromkeys(warnings)),
+    }
