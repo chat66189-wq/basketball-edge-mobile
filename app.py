@@ -642,7 +642,20 @@ async def recommend_parlay(request: Request):
                 in_window.append(fixture)
         in_window.sort(key=lambda x: str(x.get("start_time") or ""))
         total_in_window = len(in_window)
-        scan_games = in_window[:50]
+
+        # Prioritize fixtures whose competition is actually represented in the
+        # user's imported local history before applying the 50-game processing cap.
+        imported_competitions = {
+            _normalise_label(g.get("competition"))
+            for g in all_games
+            if isinstance(g, dict) and str(g.get("competition") or "").strip()
+        }
+        matching_fixtures = [
+            x for x in in_window
+            if _normalise_label(x.get("competition")) in imported_competitions
+        ]
+        scan_pool = matching_fixtures if matching_fixtures else in_window
+        scan_games = scan_pool[:50]
 
         all_candidates = []
         skipped: dict[str, int] = {}
@@ -732,6 +745,14 @@ async def recommend_parlay(request: Request):
             "matches_in_window": total_in_window,
             "matches_scanned": len(scan_games),
             "matches_analysed": analysed,
+            "matches_matching_imported_competitions": len(matching_fixtures),
+            "imported_competitions": sorted({
+                str(g.get("competition") or "").strip()
+                for g in all_games if isinstance(g, dict) and str(g.get("competition") or "").strip()
+            }),
+            "fixture_competitions_scanned": sorted({
+                str(x.get("competition") or "").strip() for x in scan_games
+            }),
             "skipped": skipped,
             "eligible_market_selections": len(all_candidates),
             "top_picks": top_picks,
