@@ -347,6 +347,28 @@ def _normalise_label(value: Any) -> str:
     return re.sub(r"[^a-z0-9]+", "", raw)
 
 
+def _normalise_competition(value: Any) -> str:
+    """Normalize common provider naming differences without merging distinct leagues."""
+    label = _normalise_label(value)
+    if not label:
+        return ""
+    if "women" in label or "womens" in label:
+        gender = "women"
+    else:
+        gender = ""
+    if "wnba" in label:
+        return "wnba" + gender
+    if "euroleague" in label:
+        return "euroleague" + gender
+    if "eurocup" in label:
+        return "eurocup" + gender
+    if label in {"nba", "nbamen", "nationalbasketballassociation", "nationalbasketballassociationmen"}:
+        return "nba"
+    # Strip common men's/box-score/provider descriptors for otherwise exact labels.
+    label = re.sub(r"(mens|men|male|boxscores?|basketball|statistics|stats)$", "", label)
+    return label + gender
+
+
 def _positive_price(value: Any) -> float | None:
     try:
         price = float(value)
@@ -360,7 +382,7 @@ def _history_scope_for_fixture(fixture: dict[str, Any], all_games: list[dict], a
     competition = str(fixture.get("competition") or "").strip()
     if not competition:
         raise ValueError("fixture_competition_missing")
-    comp_rows = [g for g in all_games if _normalise_label(g.get("competition")) == _normalise_label(competition)]
+    comp_rows = [g for g in all_games if _normalise_competition(g.get("competition")) == _normalise_competition(competition)]
     season_rows: dict[str, list[tuple[datetime, dict]]] = {}
     for row in comp_rows:
         season = str(row.get("season") or "").strip()
@@ -646,13 +668,13 @@ async def recommend_parlay(request: Request):
         # Prioritize fixtures whose competition is actually represented in the
         # user's imported local history before applying the 50-game processing cap.
         imported_competitions = {
-            _normalise_label(g.get("competition"))
+            _normalise_competition(g.get("competition"))
             for g in all_games
             if isinstance(g, dict) and str(g.get("competition") or "").strip()
         }
         matching_fixtures = [
             x for x in in_window
-            if _normalise_label(x.get("competition")) in imported_competitions
+            if _normalise_competition(x.get("competition")) in imported_competitions
         ]
         scan_pool = matching_fixtures if matching_fixtures else in_window
         scan_games = scan_pool[:50]
@@ -746,6 +768,8 @@ async def recommend_parlay(request: Request):
             "matches_scanned": len(scan_games),
             "matches_analysed": analysed,
             "matches_matching_imported_competitions": len(matching_fixtures),
+            "local_games_count": len(all_games),
+            "local_team_stats_count": len(all_stats),
             "imported_competitions": sorted({
                 str(g.get("competition") or "").strip()
                 for g in all_games if isinstance(g, dict) and str(g.get("competition") or "").strip()
@@ -753,6 +777,10 @@ async def recommend_parlay(request: Request):
             "fixture_competitions_scanned": sorted({
                 str(x.get("competition") or "").strip() for x in scan_games
             }),
+            "fixture_competitions_in_window": sorted({
+                str(x.get("competition") or "").strip() for x in in_window
+                if str(x.get("competition") or "").strip()
+            })[:40],
             "skipped": skipped,
             "eligible_market_selections": len(all_candidates),
             "top_picks": top_picks,
