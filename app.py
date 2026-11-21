@@ -81,6 +81,44 @@ def _number(value: Any, name: str, minimum: float = 0.0) -> float:
     return result
 
 
+def _historical_datetime(value: Any, name: str) -> datetime:
+    """Parse provider event timestamps; naive provider dates are interpreted as UTC."""
+    if isinstance(value, bool) or value is None:
+        raise ValueError(f"{name}_invalid_timestamp")
+    if isinstance(value, (int, float)):
+        stamp = float(value)
+        if not math.isfinite(stamp):
+            raise ValueError(f"{name}_invalid_timestamp")
+        # Providers may send Unix seconds or milliseconds.
+        if abs(stamp) >= 1e12:
+            stamp /= 1000.0
+        try:
+            return datetime.fromtimestamp(stamp, tz=timezone.utc)
+        except (OverflowError, OSError, ValueError) as exc:
+            raise ValueError(f"{name}_invalid_timestamp") from exc
+
+    raw = str(value).strip()
+    if not raw:
+        raise ValueError(f"{name}_required")
+    # Some feeds serialize Unix timestamps as strings.
+    try:
+        numeric_stamp = float(raw)
+    except ValueError:
+        numeric_stamp = None
+    if numeric_stamp is not None:
+        return _historical_datetime(numeric_stamp, name)
+
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"{name}_invalid_iso8601") from exc
+    # SportAPI event times can be ISO strings without an offset. Treat those as UTC
+    # rather than silently dropping every such historical row.
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
 def _build_history(payload: dict[str, Any], as_of: datetime) -> tuple[list[TeamGame], dict[str, int]]:
     games = payload.get("games")
     stats = payload.get("team_stats")
@@ -118,7 +156,7 @@ def _build_history(payload: dict[str, Any], as_of: datetime) -> tuple[list[TeamG
             counters["games_skipped"] += 1
             continue
         try:
-            played = _aware_datetime(game.get("event_time"), "event_time")
+            played = _historical_datetime(game.get("event_time"), "event_time")
             # The v20 games CSV template has no official result-publication timestamp.
             # Use a conservative +24h availability proxy and disclose it in the response.
             available = played + timedelta(hours=24)
@@ -393,7 +431,7 @@ def _history_scope_for_fixture(fixture: dict[str, Any], all_games: list[dict], a
         if not season:
             continue
         try:
-            played = _aware_datetime(row.get("event_time"), "event_time")
+            played = _historical_datetime(row.get("event_time"), "event_time")
         except ValueError:
             continue
         if played + timedelta(hours=24) < start_time:
