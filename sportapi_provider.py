@@ -66,7 +66,7 @@ def _num(value):
     except (TypeError,ValueError): return None
 
 def _team_row(eid,name,score,s):
-    fga,fta,oreb,tov,pts=(_num(s.get(k)) for k in ("fga","fta","oreb","tov"))
+    fga,fta,oreb,tov=(_num(s.get(k)) for k in ("fga","fta","oreb","tov"))
     pts=_num(score)
     if None in (fga,fta,oreb,tov,pts): return None
     poss=fga+0.44*fta-oreb+tov
