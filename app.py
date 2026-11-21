@@ -424,20 +424,49 @@ def _history_scope_for_fixture(fixture: dict[str, Any], all_games: list[dict], a
     competition = str(fixture.get("competition") or "").strip()
     if not competition:
         raise ValueError("fixture_competition_missing")
-    comp_rows = [g for g in all_games if _normalise_competition(g.get("competition")) == _normalise_competition(competition)]
+    normalized_competition = _normalise_competition(competition)
+    comp_rows = [
+        g for g in all_games
+        if _normalise_competition(g.get("competition")) == normalized_competition
+    ]
+    if not comp_rows:
+        imported_labels = sorted({
+            str(g.get("competition") or "").strip()
+            for g in all_games if isinstance(g, dict) and str(g.get("competition") or "").strip()
+        })
+        raise ValueError(
+            "no_imported_history_for_competition_before_fixture:"
+            f"fixture_competition={competition!r}:normalized={normalized_competition!r}:"
+            f"imported_competitions={imported_labels[:12]!r}"
+        )
+
     season_rows: dict[str, list[tuple[datetime, dict]]] = {}
+    parseable_dates = 0
+    invalid_dates = 0
+    latest_parseable = None
     for row in comp_rows:
         season = str(row.get("season") or "").strip()
         if not season:
             continue
         try:
             played = _historical_datetime(row.get("event_time"), "event_time")
+            parseable_dates += 1
+            if latest_parseable is None or played > latest_parseable:
+                latest_parseable = played
         except ValueError:
+            invalid_dates += 1
             continue
         if played + timedelta(hours=24) < start_time:
             season_rows.setdefault(season, []).append((played, row))
     if not season_rows:
-        raise ValueError("no_imported_history_for_competition_before_fixture")
+        latest_text = latest_parseable.isoformat() if latest_parseable else "none"
+        raise ValueError(
+            "no_imported_history_for_competition_before_fixture:"
+            f"fixture_competition={competition!r}:normalized={normalized_competition!r}:"
+            f"matching_rows={len(comp_rows)}:parseable_dates={parseable_dates}:"
+            f"invalid_dates={invalid_dates}:latest_event_time={latest_text}:"
+            f"fixture_start_time={start_time.isoformat()}"
+        )
     season, _ = max(
         season_rows.items(),
         key=lambda item: (max(x[0] for x in item[1]), len(item[1])),
@@ -723,6 +752,7 @@ async def recommend_parlay(request: Request):
 
         all_candidates = []
         skipped: dict[str, int] = {}
+        history_skip_examples: list[str] = []
         analysed = 0
         for fixture in scan_games:
             if not fixture.get("home") or not fixture.get("away"):
@@ -738,8 +768,11 @@ async def recommend_parlay(request: Request):
                     analysed += 1
                     all_candidates.extend(candidates)
             except ValueError as exc:
-                key = str(exc).split(":")[0]
+                detail = str(exc)
+                key = detail.split(":")[0]
                 skipped[key] = skipped.get(key, 0) + 1
+                if key == "no_imported_history_for_competition_before_fixture" and len(history_skip_examples) < 5:
+                    history_skip_examples.append(detail)
             except Exception:
                 skipped["analysis_error"] = skipped.get("analysis_error", 0) + 1
 
@@ -824,6 +857,7 @@ async def recommend_parlay(request: Request):
                 if str(x.get("competition") or "").strip()
             })[:40],
             "skipped": skipped,
+            "history_skip_examples": history_skip_examples,
             "eligible_market_selections": len(all_candidates),
             "top_picks": top_picks,
             "best_parlay": best_parlay,
