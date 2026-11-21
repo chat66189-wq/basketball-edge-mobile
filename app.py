@@ -385,6 +385,29 @@ def _normalise_label(value: Any) -> str:
     return re.sub(r"[^a-z0-9]+", "", raw)
 
 
+# Exact HoopsAPI-to-imported-history aliases observed for EuroLeague fixtures.
+# Targets are checked against the imported team lookup before they are used.
+_EUROLEAGUE_TEAM_ALIASES = {
+    "besiktasjk": "besiktasistanbul",
+    "paris": "parisbasketball",
+    "crvenazvezda": "crvenazvezdameridianbetbelgrade",
+    "bayernmunich": "fcbayernmunich",
+    "maccabitelaviv": "maccabirapydtelaviv",
+    "valenciabc": "valenciabasket",
+    "asvelvilleurbanne": "ldlcasvelvilleurbanne",
+    "olimpiamilano": "ea7emporioarmanimilan",
+}
+
+
+def _fixture_team_lookup_key(value: Any, competition: str, imported_lookup: dict[str, str]) -> str:
+    key = _normalise_label(value)
+    if competition == "euroleague":
+        alias_target = _EUROLEAGUE_TEAM_ALIASES.get(key)
+        if alias_target and alias_target in imported_lookup:
+            return alias_target
+    return key
+
+
 def _normalise_competition(value: Any) -> str:
     """Normalize common provider naming differences without merging distinct leagues."""
     label = _normalise_label(value)
@@ -490,8 +513,8 @@ def _history_scope_for_fixture(fixture: dict[str, Any], all_games: list[dict], a
 
     fixture_home_name = str(fixture.get("home") or "").strip()
     fixture_away_name = str(fixture.get("away") or "").strip()
-    home = team_lookup.get(_normalise_label(fixture_home_name))
-    away = team_lookup.get(_normalise_label(fixture_away_name))
+    home = team_lookup.get(_fixture_team_lookup_key(fixture_home_name, normalized_competition, team_lookup))
+    away = team_lookup.get(_fixture_team_lookup_key(fixture_away_name, normalized_competition, team_lookup))
     if not home or not away or home == away:
         imported_team_names = sorted({
             str(name).strip()
