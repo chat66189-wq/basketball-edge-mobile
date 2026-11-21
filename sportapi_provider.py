@@ -93,7 +93,7 @@ def sync(league,season=None,date=None,limit=20):
     if not re.fullmatch(r"[A-Za-z0-9-]{1,80}",league): raise SportAPIError("Seleccioná una competición válida.",422)
     try: limit=int(limit)
     except (TypeError,ValueError): raise SportAPIError("Límite inválido.",422) from None
-    if not 1<=limit<=40: raise SportAPIError("El límite por importación es de 1 a 40 partidos.",422)
+    if not 1<=limit<=200: raise SportAPIError("El límite por importación es de 1 a 200 partidos.",422)
     if date:
         try: datetime.strptime(date,"%Y-%m-%d")
         except ValueError: raise SportAPIError("La fecha debe tener formato AAAA-MM-DD.",422) from None

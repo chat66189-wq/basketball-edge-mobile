@@ -88,8 +88,8 @@
         <label for="sportapi-league">Competición</label><select id="sportapi-league"><option value="">Primero buscá competiciones</option></select>
         <label for="sportapi-season">Temporada (según la competición)</label><input id="sportapi-season" value="2026-27" placeholder="Ej.: 2026-27">
         <label for="sportapi-date">Fecha específica (opcional)</label><input id="sportapi-date" type="date">
-        <label for="sportapi-limit">Partidos finalizados</label><select id="sportapi-limit"><option value="10">10</option><option value="20" selected>20</option><option value="40">40</option></select>
-        <p class="small">Cada partido puede consumir hasta 2 solicitudes adicionales para estadísticas de equipos y jugadores. Máximo 40 partidos por importación.</p>
+        <label for="sportapi-limit">Partidos finalizados</label><select id="sportapi-limit"><option value="20">20</option><option value="40">40</option><option value="100">100</option><option value="150">150</option><option value="200" selected>200</option></select>
+        <p class="small">Cada partido puede consumir hasta 2 solicitudes adicionales para estadísticas de equipos y jugadores. Máximo 200 partidos por importación (límite documentado por SportAPI.ai).</p>
         <div class="actions"><button class="action" id="sportapi-import" type="button">Importar datos de SportAPI.ai</button></div>
         <div id="sportapi-result" class="small"></div>
       </div>
