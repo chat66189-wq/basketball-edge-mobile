@@ -673,7 +673,12 @@ async def recommend_parlay(request: Request):
             previous = best_by_selection.get(key)
             if previous is None or candidate["odds"] > previous["odds"]:
                 best_by_selection[key] = candidate
-        top_picks = sorted(best_by_selection.values(),
+        best_by_game = {}
+        for candidate in best_by_selection.values():
+            previous = best_by_game.get(candidate["event_id"])
+            if previous is None or (candidate["score"], candidate["probability"]) > (previous["score"], previous["probability"]):
+                best_by_game[candidate["event_id"]] = candidate
+        top_picks = sorted(best_by_game.values(),
                            key=lambda x: (x["score"], x["probability"]), reverse=True)[:12]
 
         # A real single-bookmaker accumulator needs every leg at the same operator.
