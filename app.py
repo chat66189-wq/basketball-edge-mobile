@@ -300,3 +300,40 @@ def provider_sync(league: int, season: str, date: str | None = None, limit: int 
   from provider_api import ProviderError
   if isinstance(e,ProviderError): raise HTTPException(status_code=e.status,detail=str(e))
   raise HTTPException(status_code=500,detail="provider_sync_failed")
+
+
+@app.get("/api/sportapi/status")
+def sportapi_status():
+    try:
+        from sportapi_provider import status
+        return status()
+    except Exception as exc:
+        from sportapi_provider import SportAPIError
+        if isinstance(exc, SportAPIError):
+            raise HTTPException(status_code=exc.status, detail=str(exc))
+        raise HTTPException(status_code=500, detail="sportapi_status_failed")
+
+
+@app.get("/api/sportapi/leagues")
+def sportapi_leagues(search: str | None = None):
+    try:
+        from sportapi_provider import leagues
+        return leagues(search)
+    except Exception as exc:
+        from sportapi_provider import SportAPIError
+        if isinstance(exc, SportAPIError):
+            raise HTTPException(status_code=exc.status, detail=str(exc))
+        raise HTTPException(status_code=500, detail="sportapi_leagues_failed")
+
+
+@app.get("/api/sportapi/sync")
+def sportapi_sync(league: str, season: str | None = None, date: str | None = None, limit: int = 20):
+    try:
+        from sportapi_provider import sync
+        return sync(league, season, date, limit)
+    except Exception as exc:
+        from sportapi_provider import SportAPIError
+        if isinstance(exc, SportAPIError):
+            raise HTTPException(status_code=exc.status, detail=str(exc))
+        raise HTTPException(status_code=500, detail="sportapi_sync_failed")
+

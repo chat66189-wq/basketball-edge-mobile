@@ -80,6 +80,19 @@
         <label for="provider-limit">Partidos finalizados a consultar</label><select id="provider-limit"><option>20</option><option selected>40</option><option>60</option><option>100</option></select>
         <div class="actions"><button class="action" id="provider-import" type="button">Importar datos</button></div><div id="provider-result" class="small"></div>
       </div>
+      <div class="panel"><h2>Importación automática · SportAPI.ai</h2>
+        <p class="small">Usa la clave privada SPORTAPI_KEY guardada en Render. Importa ligas, resultados, estadísticas de equipo y box scores de jugadores cuando estén disponibles. No incluye cuotas.</p>
+        <div class="actions"><button class="action secondary" id="sportapi-check" type="button">Comprobar conexión</button><button class="action" id="sportapi-find" type="button">Buscar competiciones</button></div>
+        <div id="sportapi-message" class="fileline" aria-live="polite"></div>
+        <label for="sportapi-search">Buscar competición</label><input id="sportapi-search" placeholder="NBA, WNBA, NCAA, EuroLeague…">
+        <label for="sportapi-league">Competición</label><select id="sportapi-league"><option value="">Primero buscá competiciones</option></select>
+        <label for="sportapi-season">Temporada (según la competición)</label><input id="sportapi-season" value="2026-27" placeholder="Ej.: 2026-27">
+        <label for="sportapi-date">Fecha específica (opcional)</label><input id="sportapi-date" type="date">
+        <label for="sportapi-limit">Partidos finalizados</label><select id="sportapi-limit"><option value="10">10</option><option value="20" selected>20</option><option value="40">40</option></select>
+        <p class="small">Cada partido puede consumir hasta 2 solicitudes adicionales para estadísticas de equipos y jugadores. Máximo 40 partidos por importación.</p>
+        <div class="actions"><button class="action" id="sportapi-import" type="button">Importar datos de SportAPI.ai</button></div>
+        <div id="sportapi-result" class="small"></div>
+      </div>
       <div class="panel"><h2>Simular un partido</h2><p class="small">Necesitás importar partidos finalizados y estadísticas de ambos equipos en la pestaña Datos CSV. El análisis utiliza el mismo ámbito exacto de competición y temporada.</p>
         <form id="analysis-form">
           <label for="analysis-competition">Competición (debe coincidir exactamente con el CSV)</label><input id="analysis-competition" required placeholder="Ej.: NBA">
@@ -152,6 +165,67 @@ async function providerRequest(path){const base=apiBase();const r=await fetch(ba
 document.getElementById('provider-check').addEventListener('click',async()=>{try{providerMessage.textContent='Comprobando…';const d=await providerRequest('/api/provider/status');providerMessage.textContent='Clave válida. Plan: '+(d.subscription?.plan||'ver panel API-Sports')+'. Solicitudes: '+JSON.stringify(d.requests||{});}catch(e){providerMessage.textContent=e.message;}});
 document.getElementById('provider-find').addEventListener('click',async()=>{try{providerMessage.textContent='Buscando…';const season=document.getElementById('provider-season').value.trim(),search=document.getElementById('provider-search').value.trim();const d=await providerRequest('/api/provider/leagues?'+new URLSearchParams({season,...(search?{search}:{})}));const select=document.getElementById('provider-league');select.innerHTML='<option value="">Elegí una competición</option>';for(const league of d.leagues||[]){const o=document.createElement('option');o.value=league.id;o.textContent=league.name+' · '+(league.country?.name||'')+' · '+(league.type||'');select.appendChild(o);}providerMessage.textContent=(d.count||d.leagues?.length||0)+' competiciones encontradas. La cobertura varía según liga y temporada.';}catch(e){providerMessage.textContent=e.message;}});
 document.getElementById('provider-import').addEventListener('click',async()=>{const out=document.getElementById('provider-result');try{const league=document.getElementById('provider-league').value;if(!league)throw new Error('Elegí una competición.');const season=document.getElementById('provider-season').value.trim(),date=document.getElementById('provider-date').value,limit=document.getElementById('provider-limit').value;out.textContent='Descargando…';const d=await providerRequest('/api/provider/sync?'+new URLSearchParams({league,season,limit,...(date?{date}:{})}));for(const row of d.games||[])await putRecord({key:'dataset:games:'+row.event_id,kind:'dataset',type:'games',data:row,created:Date.now()});for(const row of d.team_stats||[])await putRecord({key:'dataset:team_stats:'+row.event_id+':'+row.team,kind:'dataset',type:'team_stats',data:row,created:Date.now()});await refresh();out.textContent='Importado: '+d.games_received+' partidos; '+d.completed_games+' finalizados; '+d.team_stats_rows+' registros de estadísticas de equipo. '+(d.warnings||[]).join(' ');}catch(e){out.textContent='Error: '+e.message;}});
+
+
+const sportApiMessage=document.getElementById('sportapi-message');
+async function sportApiRequest(path){
+  const base=apiBase();
+  const response=await fetch(base+path,{cache:'no-store'});
+  let data;
+  try{data=await response.json();}catch(_){throw new Error('Respuesta inválida del servidor.');}
+  if(!response.ok)throw new Error(data.detail||('HTTP '+response.status));
+  return data;
+}
+document.getElementById('sportapi-check').addEventListener('click',async()=>{
+  try{
+    sportApiMessage.textContent='Comprobando conexión con SportAPI.ai…';
+    const data=await sportApiRequest('/api/sportapi/status');
+    const quota=data.quota||{};
+    const remaining=quota.daily_remaining?(' Solicitudes diarias restantes: '+quota.daily_remaining+'.'):'';
+    sportApiMessage.textContent='Clave aceptada. Competiciones disponibles: '+data.league_count+'.'+remaining;
+  }catch(error){sportApiMessage.textContent=error.message;}
+});
+document.getElementById('sportapi-find').addEventListener('click',async()=>{
+  try{
+    sportApiMessage.textContent='Buscando competiciones…';
+    const search=document.getElementById('sportapi-search').value.trim();
+    const data=await sportApiRequest('/api/sportapi/leagues'+(search?'?'+new URLSearchParams({search}):''));
+    const select=document.getElementById('sportapi-league');
+    select.innerHTML='<option value="">Elegí una competición</option>';
+    for(const league of data.leagues||[]){
+      const option=document.createElement('option');
+      option.value=league.slug||league.id;
+      option.dataset.season=league.current_season||'';
+      const coverage=league.box_scores?'box scores':'solo resultados';
+      option.textContent=(league.name||league.slug)+' · '+(league.gender||'género no indicado')+' · '+coverage;
+      select.appendChild(option);
+    }
+    sportApiMessage.textContent=(data.count||0)+' competiciones encontradas. Revisá la cobertura de box scores antes de importar.';
+  }catch(error){sportApiMessage.textContent=error.message;}
+});
+document.getElementById('sportapi-league').addEventListener('change',event=>{
+  const selected=event.target.selectedOptions[0];
+  if(selected&&selected.dataset.season)document.getElementById('sportapi-season').value=selected.dataset.season;
+});
+document.getElementById('sportapi-import').addEventListener('click',async()=>{
+  const output=document.getElementById('sportapi-result');
+  try{
+    const league=document.getElementById('sportapi-league').value;
+    if(!league)throw new Error('Primero buscá y elegí una competición.');
+    const season=document.getElementById('sportapi-season').value.trim();
+    const date=document.getElementById('sportapi-date').value;
+    const limit=document.getElementById('sportapi-limit').value;
+    if(!date&&!season)throw new Error('Ingresá la temporada o seleccioná una fecha específica.');
+    output.textContent='Descargando partidos y estadísticas…';
+    const query=new URLSearchParams({league,limit,...(season?{season}:{}),...(date?{date}:{})});
+    const data=await sportApiRequest('/api/sportapi/sync?'+query);
+    for(const row of data.games||[])await putRecord({key:'dataset:games:'+row.event_id,kind:'dataset',type:'games',data:row,created:Date.now()});
+    for(const row of data.team_stats||[])await putRecord({key:'dataset:team_stats:'+row.event_id+':'+row.team,kind:'dataset',type:'team_stats',data:row,created:Date.now()});
+    for(const row of data.player_stats||[])await putRecord({key:'dataset:player_stats:'+row.event_id+':'+row.player_id,kind:'dataset',type:'player_stats',data:row,created:Date.now()});
+    await refresh();
+    output.textContent='Importado: '+data.games_received+' partidos; '+data.team_stats_rows+' registros de equipos; '+data.player_stats_rows+' registros de jugadores. '+(data.warnings||[]).join(' ');
+  }catch(error){output.textContent='Error: '+error.message;}
+});
 
 const marketSelect=document.getElementById('analysis-market');
 const sideSelect=document.getElementById('analysis-side');
