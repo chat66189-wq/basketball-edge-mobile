@@ -362,10 +362,14 @@ def _normalise_competition(value: Any) -> str:
         return "euroleague" + gender
     if "eurocup" in label:
         return "eurocup" + gender
+    # NBA aliases may include country/provider suffixes, but must not absorb NBA G League.
     if label in {"nba", "nbamen", "nationalbasketballassociation", "nationalbasketballassociationmen"}:
         return "nba"
-    # Strip common men's/box-score/provider descriptors for otherwise exact labels.
-    label = re.sub(r"(mens|men|male|boxscores?|basketball|statistics|stats)$", "", label)
+    if label.startswith("nba") and not label.startswith(("nbagleague", "nbawomen")):
+        return "nba"
+    # Strip common descriptors in sequence (e.g. "NBA Men Box Scores").
+    label = re.sub(r"(boxscores?|basketball|statistics|stats)$", "", label)
+    label = re.sub(r"(mens|men|male)$", "", label)
     return label + gender
 
 
