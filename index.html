@@ -68,6 +68,18 @@
         <div class="actions"><button class="action secondary" id="save-api-url" type="button">Guardar dirección</button><button class="action" id="test-api" type="button">Probar conexión</button></div>
         <div id="api-message" class="fileline" aria-live="polite">Servidor sin configurar.</div>
       </div>
+
+      <div class="panel"><h2>Importación automática · API-Sports</h2>
+        <p class="small">La clave queda protegida en Render. Elegí temporada y competición; los datos disponibles se guardan localmente en este iPhone.</p>
+        <label for="provider-season">Temporada</label><input id="provider-season" value="2026-2027">
+        <label for="provider-search">Buscar competición</label><input id="provider-search" placeholder="NBA, EuroLeague, NCAA…">
+        <div class="actions"><button class="action secondary" id="provider-check" type="button">Comprobar clave</button><button class="action" id="provider-find" type="button">Buscar competiciones</button></div>
+        <div id="provider-message" class="fileline" aria-live="polite"></div>
+        <label for="provider-league">Competición</label><select id="provider-league"><option value="">Primero buscá competiciones</option></select>
+        <label for="provider-date">Fecha específica (opcional)</label><input id="provider-date" type="date">
+        <label for="provider-limit">Partidos finalizados a consultar</label><select id="provider-limit"><option>20</option><option selected>40</option><option>60</option><option>100</option></select>
+        <div class="actions"><button class="action" id="provider-import" type="button">Importar datos</button></div><div id="provider-result" class="small"></div>
+      </div>
       <div class="panel"><h2>Simular un partido</h2><p class="small">Necesitás importar partidos finalizados y estadísticas de ambos equipos en la pestaña Datos CSV. El análisis utiliza el mismo ámbito exacto de competición y temporada.</p>
         <form id="analysis-form">
           <label for="analysis-competition">Competición (debe coincidir exactamente con el CSV)</label><input id="analysis-competition" required placeholder="Ej.: NBA">
@@ -134,6 +146,13 @@ const savedApi=localStorage.getItem('bea-v20-api-url')||'';apiInput.value=savedA
 function apiBase(){const value=apiInput.value.trim().replace(/\/$/,'');if(!value)throw new Error('Primero configurá la URL del servidor API.');if(!/^https:\/\//i.test(value))throw new Error('La URL debe comenzar con https://');return value;}
 document.getElementById('save-api-url').addEventListener('click',()=>{try{const value=apiBase();localStorage.setItem('bea-v20-api-url',value);apiMessage.textContent='Dirección guardada en este iPhone.';}catch(e){apiMessage.textContent=e.message;}});
 document.getElementById('test-api').addEventListener('click',async()=>{try{const base=apiBase();localStorage.setItem('bea-v20-api-url',base);apiMessage.textContent='Conectando…';const response=await fetch(base+'/api/health',{cache:'no-store'});if(!response.ok)throw new Error('El servidor respondió HTTP '+response.status);const data=await response.json();if(data.status!=='ok')throw new Error('Respuesta de salud no reconocida.');apiMessage.textContent='Conexión correcta · '+data.service+' · '+data.version;}catch(e){apiMessage.textContent='No se pudo conectar: '+e.message+'. Revisá la URL y el estado del despliegue.';}});
+
+const providerMessage=document.getElementById('provider-message');
+async function providerRequest(path){const base=apiBase();const r=await fetch(base+path,{cache:'no-store'});let d;try{d=await r.json()}catch(_){throw new Error('Respuesta inválida del servidor.')}if(!r.ok)throw new Error(d.detail||('HTTP '+r.status));return d;}
+document.getElementById('provider-check').addEventListener('click',async()=>{try{providerMessage.textContent='Comprobando…';const d=await providerRequest('/api/provider/status');providerMessage.textContent='Clave válida. Plan: '+(d.subscription?.plan||'ver panel API-Sports')+'. Solicitudes: '+JSON.stringify(d.requests||{});}catch(e){providerMessage.textContent=e.message;}});
+document.getElementById('provider-find').addEventListener('click',async()=>{try{providerMessage.textContent='Buscando…';const season=document.getElementById('provider-season').value.trim(),search=document.getElementById('provider-search').value.trim();const d=await providerRequest('/api/provider/leagues?'+new URLSearchParams({season,...(search?{search}:{})}));const select=document.getElementById('provider-league');select.innerHTML='<option value="">Elegí una competición</option>';for(const league of d.leagues||[]){const o=document.createElement('option');o.value=league.id;o.textContent=league.name+' · '+(league.country?.name||'')+' · '+(league.type||'');select.appendChild(o);}providerMessage.textContent=(d.count||d.leagues?.length||0)+' competiciones encontradas. La cobertura varía según liga y temporada.';}catch(e){providerMessage.textContent=e.message;}});
+document.getElementById('provider-import').addEventListener('click',async()=>{const out=document.getElementById('provider-result');try{const league=document.getElementById('provider-league').value;if(!league)throw new Error('Elegí una competición.');const season=document.getElementById('provider-season').value.trim(),date=document.getElementById('provider-date').value,limit=document.getElementById('provider-limit').value;out.textContent='Descargando…';const d=await providerRequest('/api/provider/sync?'+new URLSearchParams({league,season,limit,...(date?{date}:{})}));for(const row of d.games||[])await putRecord({key:'dataset:games:'+row.event_id,kind:'dataset',type:'games',data:row,created:Date.now()});for(const row of d.team_stats||[])await putRecord({key:'dataset:team_stats:'+row.event_id+':'+row.team,kind:'dataset',type:'team_stats',data:row,created:Date.now()});await refresh();out.textContent='Importado: '+d.games_received+' partidos; '+d.completed_games+' finalizados; '+d.team_stats_rows+' registros de estadísticas de equipo. '+(d.warnings||[]).join(' ');}catch(e){out.textContent='Error: '+e.message;}});
+
 const marketSelect=document.getElementById('analysis-market');
 const sideSelect=document.getElementById('analysis-side');
 const lineWrap=document.getElementById('analysis-line-wrap');
