@@ -272,3 +272,31 @@ async def analyze_game(request: Request):
     except Exception as exc:
         # Avoid returning stack traces or local file paths to public clients.
         raise HTTPException(status_code=500, detail=f"analysis_failed:{type(exc).__name__}") from exc
+
+@app.get("/api/provider/status")
+def provider_status():
+ try:
+  from provider_api import status
+  return status()
+ except Exception as e:
+  from provider_api import ProviderError
+  if isinstance(e,ProviderError): raise HTTPException(status_code=e.status,detail=str(e))
+  raise HTTPException(status_code=500,detail="provider_status_failed")
+@app.get("/api/provider/leagues")
+def provider_leagues(season: str, search: str | None = None):
+ try:
+  from provider_api import leagues
+  return leagues(season,search)
+ except Exception as e:
+  from provider_api import ProviderError
+  if isinstance(e,ProviderError): raise HTTPException(status_code=e.status,detail=str(e))
+  raise HTTPException(status_code=500,detail="provider_leagues_failed")
+@app.get("/api/provider/sync")
+def provider_sync(league: int, season: str, date: str | None = None, limit: int = 40):
+ try:
+  from provider_api import sync
+  return sync(league,season,date,limit)
+ except Exception as e:
+  from provider_api import ProviderError
+  if isinstance(e,ProviderError): raise HTTPException(status_code=e.status,detail=str(e))
+  raise HTTPException(status_code=500,detail="provider_sync_failed")
