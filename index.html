@@ -298,7 +298,8 @@ document.getElementById('build-parlay').addEventListener('click',async()=>{
    '<p>Competiciones de HoopsAPI que coinciden con el historial: '+Number(data.matches_matching_imported_competitions||0)+'</p>'+
    '<p>Competiciones revisadas: '+(data.fixture_competitions_scanned||[]).map(safe).join(' / ')+'</p>'+
    '<p>Competiciones detectadas en la ventana: '+(data.fixture_competitions_in_window||[]).map(safe).join(' / ')+'</p>'+
-   '<p>Detalle de fechas/competiciones sin historial: '+(data.history_skip_examples||[]).map(safe).join(' · ')+'</p></details>';
+   '<p>Detalle de fechas/competiciones sin historial: '+(data.history_skip_examples||[]).map(safe).join(' · ')+'</p>'+
+   '<p>Detalle de equipos sin coincidencia: '+(data.team_name_skip_examples||[]).map(safe).join(' · ')+'</p></details>';
   let body='<div class="panel"><div class="row"><h3>Resultado de búsqueda</h3><span class="pill">'+safe(data.status)+'</span></div>'+stats+skips+diagnostic;
   if(data.top_picks&&data.top_picks.length){
    body+='<h3>Mejores picks individuales encontrados</h3>'+data.top_picks.slice(0,8).map((c,i)=>parlayCandidateHtml(c,i)).join('');
