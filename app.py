@@ -208,7 +208,7 @@ def capabilities():
         "stateless_requests": True,
         "persistent_server_storage": False,
         "validation_status": "EXPLORATORY_NOT_VALIDATED",
-        "note": "No sports provider, live odds feed, trained exact-scope model card, or approved pick gate is configured.",
+        "note": "No authenticated GanamosVIP/Azar247 odds feed is configured. The API accepts manually captured bookmaker quote pairs for supported full-game markets; all output remains exploratory.",
     }
 
 
@@ -701,7 +701,8 @@ def _fixture_market_groups(fixture: dict, now: datetime) -> dict:
 
 
 def _score_fixture(fixture: dict, all_games: list[dict], all_stats: list[dict],
-                   simulations: int, minimum_history: int, now: datetime) -> tuple[list[dict], str | None]:
+                   simulations: int, minimum_history: int, now: datetime,
+                   manual_groups: dict | None = None) -> tuple[list[dict], str | None]:
     start_time = _aware_datetime(fixture.get("start_time"), "fixture_start_time")
     history, counters, competition, season, home, away, priors, home_rates, away_rates = _history_scope_for_fixture(
         fixture, all_games, all_stats, start_time
@@ -721,7 +722,7 @@ def _score_fixture(fixture: dict, all_games: list[dict], all_stats: list[dict],
     seed = 20261121 + sum(ord(ch) for ch in fixture_id)
     simulation = simulate_game(projection, simulations=simulations, seed=seed)
 
-    groups = _fixture_market_groups(fixture, now)
+    groups = manual_groups if manual_groups is not None else _fixture_market_groups(fixture, now)
     output = []
     shrink = min(0.65, min(home_rates.games, away_rates.games) / 20.0)
     for (market, line), quotes in groups.items():
@@ -964,6 +965,290 @@ async def preview_parlay(request: Request):
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"local_preview_failed:{type(exc).__name__}") from exc
+
+
+
+
+@app.post("/api/parlay/bookmaker-recommend")
+async def recommend_bookmaker_parlay(request: Request):
+    """Score manually captured, paired sportsbook quotes using local team history only."""
+    try:
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            raise ValueError("request_body_must_be_object")
+        house = str(payload.get("house") or "").strip()
+        if house not in {"GanamosVIP", "Azar247"}:
+            raise ValueError("house_must_be_GanamosVIP_or_Azar247")
+        start_time = _aware_datetime(payload.get("window_start"), "window_start")
+        end_time = _aware_datetime(payload.get("window_end"), "window_end")
+        if end_time <= start_time:
+            raise ValueError("window_end_must_be_after_window_start")
+        if end_time - start_time > timedelta(days=7):
+            raise ValueError("maximum_window_is_7_days")
+        target_odds = _number(payload.get("target_odds"), "target_odds", 1.01)
+        if target_odds > 100:
+            raise ValueError("target_odds_must_not_exceed_100")
+        simulations = int(payload.get("simulations", 10000))
+        if not 1000 <= simulations <= 50000:
+            raise ValueError("simulations_must_be_between_1000_and_50000")
+        minimum_history = int(payload.get("minimum_history_games", 8))
+        if not 8 <= minimum_history <= 30:
+            raise ValueError("minimum_history_games_must_be_between_8_and_30")
+
+        all_games = payload.get("games")
+        all_stats = payload.get("team_stats")
+        offers = payload.get("offers")
+        if not isinstance(all_games, list) or not isinstance(all_stats, list):
+            raise ValueError("local_games_and_team_stats_must_be_arrays")
+        if not isinstance(offers, list) or not offers:
+            raise ValueError("save_bookmaker_quotes_before_analysis")
+        if len(all_games) > 20000 or len(all_stats) > 40000 or len(offers) > 500:
+            raise ValueError("too_many_local_rows_or_bookmaker_quotes")
+
+        now = datetime.now(timezone.utc)
+        fixtures_by_id: dict[str, dict] = {}
+        groups_by_id: dict[str, dict] = {}
+        unsupported_market_quotes = 0
+        unconfirmed_settlement_quotes = 0
+        accepted_quote_groups = 0
+
+        for item in offers:
+            if not isinstance(item, dict) or str(item.get("house") or "").strip() != house:
+                continue
+            market = str(item.get("market") or "").strip().lower()
+            if market not in SUPPORTED_MARKETS:
+                unsupported_market_quotes += 1
+                continue
+            if str(item.get("settlement") or "unknown") != "regulation_only":
+                unconfirmed_settlement_quotes += 1
+                continue
+
+            event_id = str(item.get("event_id") or "").strip()
+            competition = str(item.get("competition") or "").strip()
+            home = str(item.get("home_team") or "").strip()
+            away = str(item.get("away_team") or "").strip()
+            if not event_id or not competition or not home or not away or home == away:
+                continue
+            start_value = item.get("start_time")
+            kickoff = _aware_datetime(start_value, "fixture_start_time")
+            fixture = {
+                "game_id": event_id,
+                "competition": competition,
+                "start_time": start_value,
+                "home": home,
+                "away": away,
+            }
+            previous = fixtures_by_id.get(event_id)
+            if previous and (
+                previous["competition"] != competition
+                or previous["home"] != home
+                or previous["away"] != away
+                or previous["start_time"] != start_value
+            ):
+                raise ValueError("same_event_id_has_conflicting_fixture_details")
+            fixtures_by_id[event_id] = fixture
+
+            captured = item.get("captured_at")
+            if not captured:
+                continue
+            try:
+                age = (now - _aware_datetime(captured, "captured_at")).total_seconds()
+            except ValueError:
+                continue
+            if age < -300 or age > 3600:
+                continue
+
+            if market in {"moneyline", "spread"}:
+                side_a, side_b = "home", "away"
+            else:
+                side_a, side_b = "over", "under"
+            price_a = _positive_price(item.get("price_a"))
+            price_b = _positive_price(item.get("price_b"))
+            if not price_a or not price_b:
+                continue
+
+            if market == "moneyline":
+                line = None
+            else:
+                line = _number(item.get("line"), "market_line", -10000)
+            group_key = (market, None if line is None else round(line, 2))
+            event_groups = groups_by_id.setdefault(event_id, {})
+            event_groups.setdefault(group_key, []).append({
+                "bookmaker": house,
+                "captured_at": str(captured),
+                "price_a": price_a,
+                "price_b": price_b,
+                "side_a": side_a,
+                "side_b": side_b,
+            })
+            accepted_quote_groups += 1
+
+        in_window = []
+        for event_id, fixture in fixtures_by_id.items():
+            kickoff = _aware_datetime(fixture.get("start_time"), "fixture_start_time")
+            if start_time <= kickoff <= end_time and groups_by_id.get(event_id):
+                in_window.append((event_id, fixture))
+        in_window.sort(key=lambda row: str(row[1].get("start_time") or ""))
+        scan_items = in_window[:50]
+
+        all_candidates = []
+        skipped: dict[str, int] = {}
+        history_skip_examples: list[str] = []
+        team_name_skip_examples: list[str] = []
+        analysed = 0
+        for event_id, fixture in scan_items:
+            try:
+                candidates, reason = _score_fixture(
+                    fixture, all_games, all_stats, simulations, minimum_history, now,
+                    manual_groups=groups_by_id.get(event_id, {}),
+                )
+                if reason:
+                    key = reason.split(":")[0]
+                    skipped[key] = skipped.get(key, 0) + 1
+                    if key == "no_imported_history_for_competition_before_fixture" and len(history_skip_examples) < 5:
+                        history_skip_examples.append(reason)
+                    if key == "fixture_team_names_do_not_match_imported_history" and len(team_name_skip_examples) < 5:
+                        team_name_skip_examples.append(reason)
+                else:
+                    analysed += 1
+                    all_candidates.extend(candidates)
+            except ValueError as exc:
+                detail = str(exc)
+                key = detail.split(":")[0]
+                skipped[key] = skipped.get(key, 0) + 1
+                if key == "no_imported_history_for_competition_before_fixture" and len(history_skip_examples) < 5:
+                    history_skip_examples.append(detail)
+                if key == "fixture_team_names_do_not_match_imported_history" and len(team_name_skip_examples) < 5:
+                    team_name_skip_examples.append(detail)
+            except Exception:
+                skipped["analysis_error"] = skipped.get("analysis_error", 0) + 1
+
+        best_by_selection = {}
+        for candidate in all_candidates:
+            key = (candidate["event_id"], candidate["market"], candidate["side"], candidate["line"])
+            previous = best_by_selection.get(key)
+            if previous is None or candidate["odds"] > previous["odds"]:
+                best_by_selection[key] = candidate
+        best_by_game = {}
+        for candidate in best_by_selection.values():
+            previous = best_by_game.get(candidate["event_id"])
+            if previous is None or (
+                candidate["score"], candidate["probability"]
+            ) > (previous["score"], previous["probability"]):
+                best_by_game[candidate["event_id"]] = candidate
+        top_picks = sorted(
+            best_by_game.values(),
+            key=lambda item: (item["score"], item["probability"]),
+            reverse=True,
+        )[:12]
+
+        by_bookmaker: dict[str, list[dict]] = {}
+        for candidate in all_candidates:
+            by_bookmaker.setdefault(candidate["bookmaker"], []).append(candidate)
+        best_parlay = None
+        for bookmaker, items in by_bookmaker.items():
+            per_game = {}
+            for item in items:
+                old = per_game.get(item["event_id"])
+                if old is None or item["score"] > old["score"]:
+                    per_game[item["event_id"]] = item
+            pool = sorted(per_game.values(), key=lambda item: item["score"], reverse=True)[:18]
+            local_best = None
+            for leg_count in range(1, min(8, len(pool)) + 1):
+                for combo in combinations(pool, leg_count):
+                    combined_odds = math.prod(item["odds"] for item in combo)
+                    if combined_odds + 1e-9 < target_odds:
+                        continue
+                    hit_probability = math.prod(item["probability"] for item in combo)
+                    overshoot = combined_odds - target_odds
+                    rank = (hit_probability, -overshoot, -leg_count)
+                    if local_best is None or rank > local_best["rank"]:
+                        local_best = {
+                            "rank": rank,
+                            "bookmaker": bookmaker,
+                            "combined_odds": combined_odds,
+                            "estimated_hit_probability": hit_probability,
+                            "legs": list(combo),
+                        }
+            if local_best and (
+                best_parlay is None or local_best["rank"] > best_parlay["rank"]
+            ):
+                best_parlay = local_best
+
+        if best_parlay:
+            best_parlay.pop("rank", None)
+            best_parlay["status"] = "EXPLORATORY_NOT_VALIDATED"
+
+        warnings = [
+            "EXPLORATORY_NOT_VALIDATED: el modelo no tiene validación walk-forward/holdout aprobada.",
+            "Las cuotas se cargaron manualmente; no existe una conexión autenticada ni actualización automática con la casa.",
+            "Solo se evalúan ganador, hándicap, total del partido y totales por equipo de tiempo reglamentario, con liquidación OT excluida confirmada.",
+            "No se usan mercados de jugadores, mitades, cuartos, margen, par/impar ni otros mercados no modelados por el motor actual.",
+            "La probabilidad estimada se mezcla con la probabilidad de mercado sin margen; sigue siendo exploratoria y no calibrada.",
+            "La probabilidad combinada multiplica las probabilidades de las piernas y supone independencia aproximada entre partidos.",
+            "Las cuotas ingresadas pueden cambiar antes de confirmar una apuesta; volvé a comprobarlas en el sitio.",
+            "El historial usa una ventana móvil de hasta 400 días de la misma competición; los cambios de plantel no están modelados.",
+        ]
+        if unconfirmed_settlement_quotes:
+            warnings.append(
+                str(unconfirmed_settlement_quotes)
+                + " cotizaciones se excluyeron porque la regla de prórroga no estaba confirmada como OT excluida."
+            )
+        if unsupported_market_quotes:
+            warnings.append(
+                str(unsupported_market_quotes)
+                + " cotizaciones se excluyeron porque el mercado no está soportado por el modelo actual."
+            )
+        if len(in_window) > 50:
+            warnings.append("Había más de 50 partidos guardados en la ventana; se analizaron los primeros 50 por hora de inicio.")
+
+        imported_competitions = sorted({
+            str(game.get("competition") or "").strip()
+            for game in all_games if isinstance(game, dict) and str(game.get("competition") or "").strip()
+        })
+        matching_count = sum(
+            1 for _, fixture in in_window
+            if _normalise_competition(fixture.get("competition")) in {
+                _normalise_competition(label) for label in imported_competitions
+            }
+        )
+        return {
+            "status": "EXPLORATORY_NOT_VALIDATED",
+            "mode": "MANUAL_BOOKMAKER_QUOTES",
+            "house": house,
+            "window": {"start": start_time.isoformat(), "end": end_time.isoformat()},
+            "target_odds": target_odds,
+            "matches_in_window": len(in_window),
+            "matches_scanned": len(scan_items),
+            "matches_analysed": analysed,
+            "matches_matching_imported_competitions": matching_count,
+            "local_games_count": len(all_games),
+            "local_team_stats_count": len(all_stats),
+            "imported_competitions": imported_competitions,
+            "fixture_competitions_scanned": sorted({
+                str(fixture.get("competition") or "") for _, fixture in scan_items
+            }),
+            "skipped": skipped,
+            "history_skip_examples": history_skip_examples,
+            "team_name_skip_examples": team_name_skip_examples,
+            "quotes_supplied": len(offers),
+            "quote_market_groups_used": accepted_quote_groups,
+            "unconfirmed_settlement_quotes": unconfirmed_settlement_quotes,
+            "unsupported_market_quotes": unsupported_market_quotes,
+            "eligible_market_selections": len(all_candidates),
+            "top_picks": top_picks,
+            "best_parlay": best_parlay,
+            "warnings": warnings,
+            "provider": house + " (cuotas manuales)",
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"bookmaker_recommendation_failed:{type(exc).__name__}",
+        ) from exc
+
 
 
 @app.get("/api/hoopsapi/status")

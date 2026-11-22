@@ -99,6 +99,34 @@
         <p class="small">El calendario usa una sola solicitud de SportAPI.ai. No descarga box scores ni consulta HoopsAPI.</p>
       </div>
 
+      <div class="panel"><h2>Cuotas reales · GanamosVIP / Azar247</h2>
+        <p class="small">No hay una API pública documentada/verificada para consultar estas casas automáticamente. Esta sección guarda en este iPhone las cuotas que ingreses y permite analizarlas con el historial local.</p>
+        <form id="bookmaker-offer-form">
+          <label for="bookmaker-house">Casa de apuestas</label>
+          <select id="bookmaker-house"><option value="GanamosVIP">GanamosVIP</option><option value="Azar247">Azar247</option></select>
+          <label for="bookmaker-fixture">Elegir partido del calendario importado (opcional)</label>
+          <select id="bookmaker-fixture"><option value="">Completar los datos del partido manualmente</option></select>
+          <div class="grid"><div><label for="bookmaker-competition">Competición (igual que el historial)</label><input id="bookmaker-competition" required placeholder="Ej.: NBA"></div><div><label for="bookmaker-start">Fecha y hora local del partido</label><input id="bookmaker-start" type="datetime-local" required></div></div>
+          <div class="grid"><div><label for="bookmaker-home">Equipo local</label><input id="bookmaker-home" required placeholder="Boston Celtics"></div><div><label for="bookmaker-away">Equipo visitante</label><input id="bookmaker-away" required placeholder="Golden State Warriors"></div></div>
+          <label for="bookmaker-market">Mercado que el motor puede evaluar</label>
+          <select id="bookmaker-market">
+            <option value="moneyline">Ganador (resultado sin OT)</option>
+            <option value="spread">Hándicap de partido</option>
+            <option value="total">Total de puntos del partido</option>
+            <option value="home_total">Total de puntos del equipo local</option>
+            <option value="away_total">Total de puntos del equipo visitante</option>
+          </select>
+          <label for="bookmaker-settlement">Regla de liquidación de este mercado</label>
+          <select id="bookmaker-settlement"><option value="unknown" selected>No confirmado</option><option value="regulation_only">Tiempo reglamentario (OT excluido)</option><option value="includes_overtime">Incluye tiempo extra</option></select>
+          <label id="bookmaker-line-label" for="bookmaker-line">Línea</label><input id="bookmaker-line" type="number" step="0.25" placeholder="Ej.: 220.5">
+          <div class="grid"><div><label id="bookmaker-price-a-label" for="bookmaker-price-a">Cuota del equipo local</label><input id="bookmaker-price-a" type="number" min="1.01" step="0.01" required placeholder="1.85"></div><div><label id="bookmaker-price-b-label" for="bookmaker-price-b">Cuota del equipo visitante</label><input id="bookmaker-price-b" type="number" min="1.01" step="0.01" required placeholder="2.10"></div></div>
+          <div class="actions"><button class="action" type="submit">Guardar este mercado y sus dos cuotas</button></div>
+        </form>
+        <div id="bookmaker-offer-message" class="fileline" aria-live="polite"></div>
+        <div class="record"><strong>Mercados guardados en este iPhone</strong><div id="bookmaker-offers-list" class="empty">Todavía no hay cuotas guardadas.</div></div>
+        <p class="notice">El motor actual solo puede calcular ganador, hándicap, total del partido y total por equipo, siempre que hayas confirmado OT excluida. Mercados de jugadores, mitades, cuartos y otros mercados se deberán modelar por separado; no se les asignará una probabilidad inventada.</p>
+      </div>
+
       <div class="panel"><h2>Combinada automática · todas las ligas de básquet disponibles</h2>
         <p class="small">Primero podés analizar el calendario con el historial guardado en este iPhone, sin consultar HoopsAPI. Para obtener cuotas y armar una combinada real, se necesita una consulta separada a HoopsAPI.</p>
         <p class="small"><a href="https://hoopsapi.com/sign-up" target="_blank" rel="noopener noreferrer">Crear clave gratuita de HoopsAPI</a> · El plan gratuito publica 10 consultas por día.</p>
@@ -108,7 +136,7 @@
           <div><label for="parlay-end">Hasta (hora local)</label><input id="parlay-end" type="datetime-local" required></div>
         </div>
         <label for="parlay-target">Cuota total objetivo</label><input id="parlay-target" type="number" min="1.01" max="100" step="0.01" value="4.00" required>
-        <div class="actions"><button class="action" type="button" id="preview-local">Analizar candidatos localmente (sin cuotas)</button><button class="action secondary" type="button" id="check-hoopsapi">Comprobar configuración</button><button class="action" type="button" id="build-parlay">Consultar HoopsAPI: buscar picks y armar combinada</button></div>
+        <div class="actions"><button class="action" type="button" id="preview-local">Analizar candidatos localmente (sin cuotas)</button><button class="action secondary" type="button" id="check-hoopsapi">Comprobar configuración</button><button class="action" type="button" id="build-parlay">Consultar HoopsAPI: buscar picks y armar combinada</button><button class="action" type="button" id="build-bookmaker-parlay">Buscar picks y combinada con cuotas guardadas de esta casa</button></div>
         <div id="parlay-message" class="fileline" aria-live="polite"></div>
         <div id="parlay-result"></div>
       </div>
@@ -154,6 +182,7 @@ const HEADERS={
  odds:['event_id','market_scope','operator','selection','line','decimal_odds','captured_at','rules']
 };
 let db;
+let bookmakerFixtureCache=[];
 function openDB(){return new Promise((resolve,reject)=>{const req=indexedDB.open(DB_NAME,DB_VERSION);req.onupgradeneeded=()=>{const d=req.result;if(!d.objectStoreNames.contains(STORE))d.createObjectStore(STORE,{keyPath:'key'});};req.onsuccess=()=>resolve(req.result);req.onerror=()=>reject(req.error);});}
 function allRecords(){return new Promise((resolve,reject)=>{const tx=db.transaction(STORE,'readonly');const r=tx.objectStore(STORE).getAll();r.onsuccess=()=>resolve(r.result||[]);r.onerror=()=>reject(r.error);});}
 function putRecord(record){return new Promise((resolve,reject)=>{const tx=db.transaction(STORE,'readwrite');tx.objectStore(STORE).put(record);tx.oncomplete=()=>resolve();tx.onerror=()=>reject(tx.error);});}
@@ -162,7 +191,7 @@ function clearAll(){return new Promise((resolve,reject)=>{const tx=db.transactio
 function csvEscape(s){const v=String(s??'');return /[",\n\r]/.test(v)?'"'+v.replace(/"/g,'""')+'"':v;}
 function parseCSV(text){const rows=[];let row=[],field='',quoted=false;for(let i=0;i<text.length;i++){const c=text[i];if(quoted){if(c==='"'&&text[i+1]==='"'){field+='"';i++;}else if(c==='"')quoted=false;else field+=c;}else if(c==='"')quoted=true;else if(c===','){row.push(field);field='';}else if(c==='\n'){row.push(field);rows.push(row);row=[];field='';}else if(c!=='\r')field+=c;}if(quoted)throw new Error('El CSV tiene comillas sin cerrar.');if(field.length||row.length){row.push(field);rows.push(row);}return rows.filter(r=>r.some(v=>v.trim()!==''));}
 function download(name,content,type){const blob=new Blob([content],{type});const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=name;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1500);}
-async function refresh(){const records=await allRecords();const datasets=Object.fromEntries(Object.keys(HEADERS).map(k=>[k,records.filter(r=>r.kind==='dataset'&&r.type===k).length]));const picks=records.filter(r=>r.kind==='pick');document.getElementById('count-games').textContent=datasets.games;document.getElementById('count-team').textContent=datasets.team_stats;document.getElementById('count-players').textContent=datasets.player_stats;document.getElementById('count-odds').textContent=datasets.odds;document.getElementById('count-fixtures').textContent=datasets.fixtures;document.getElementById('count-picks').textContent=picks.length;document.getElementById('count-pending').textContent=picks.filter(p=>!p.outcome||p.outcome==='pending').length;document.getElementById('count-wins').textContent=picks.filter(p=>p.outcome==='win').length;document.getElementById('count-losses').textContent=picks.filter(p=>p.outcome==='loss').length;document.getElementById('pick-list-count').textContent=picks.length;renderPicks(picks);}
+async function refresh(){const records=await allRecords();const datasets=Object.fromEntries(Object.keys(HEADERS).map(k=>[k,records.filter(r=>r.kind==='dataset'&&r.type===k).length]));const picks=records.filter(r=>r.kind==='pick');document.getElementById('count-games').textContent=datasets.games;document.getElementById('count-team').textContent=datasets.team_stats;document.getElementById('count-players').textContent=datasets.player_stats;document.getElementById('count-odds').textContent=datasets.odds+records.filter(r=>r.kind==='bookmaker_offer').length;document.getElementById('count-fixtures').textContent=datasets.fixtures;document.getElementById('count-picks').textContent=picks.length;document.getElementById('count-pending').textContent=picks.filter(p=>!p.outcome||p.outcome==='pending').length;document.getElementById('count-wins').textContent=picks.filter(p=>p.outcome==='win').length;document.getElementById('count-losses').textContent=picks.filter(p=>p.outcome==='loss').length;document.getElementById('pick-list-count').textContent=picks.length;renderPicks(picks);renderBookmakerOffers(records);populateBookmakerFixtures(records);}
 async function renderHistoryDiagnostics(){
  const box=document.getElementById('history-diagnostics');
  if(!box)return;
@@ -238,6 +267,122 @@ document.querySelector('nav button[data-tab="datos"]').addEventListener('click',
 
 function safe(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 function renderPicks(picks){const box=document.getElementById('pick-list');if(!picks.length){box.className='empty';box.textContent='Todavía no hay picks registrados.';return;}box.className='';box.innerHTML=picks.sort((a,b)=>b.created-a.created).map(p=>`<article class="record"><div class="row"><strong>${safe(p.market)} · ${safe(p.selection)}</strong><span class="pill">${safe(p.outcome||'pending')}</span></div><p>Evento: ${safe(p.event)} · ${safe(p.competition||'Sin competición')}</p><p>Cuota: ${safe(p.odds||'—')} · Probabilidad declarada: ${p.probability===''?'—':safe(p.probability)+'%'}</p><p>Decisión: ${safe(p.decision)}${p.notes?' · '+safe(p.notes):''}</p><div class="actions"><select aria-label="Liquidar pick" data-settle="${safe(p.key)}"><option value="pending" ${(!p.outcome||p.outcome==='pending')?'selected':''}>Pendiente</option><option value="win" ${p.outcome==='win'?'selected':''}>WIN</option><option value="loss" ${p.outcome==='loss'?'selected':''}>LOSS</option><option value="void" ${p.outcome==='void'?'selected':''}>VOID</option></select><button class="action danger" data-delete="${safe(p.key)}" type="button">Eliminar</button></div></article>`).join('');}
+
+function bookmakerMarketName(market){
+ const names={moneyline:"Ganador",spread:"Hándicap",total:"Total del partido",home_total:"Total del equipo local",away_total:"Total del equipo visitante"};
+ return names[market]||market;
+}
+function populateBookmakerFixtures(records){
+ const select=document.getElementById('bookmaker-fixture');
+ if(!select)return;
+ const previous=select.value;
+ bookmakerFixtureCache=records.filter(r=>r.kind==='dataset'&&r.type==='fixtures'&&r.data&&
+   (r.data.fixture_id||r.data.event_id)&&r.data.home_team&&r.data.away_team&&r.data.start_time)
+   .map(r=>r.data).sort((a,b)=>String(a.start_time).localeCompare(String(b.start_time)));
+ select.innerHTML='<option value="">Completar los datos del partido manualmente</option>'+
+  bookmakerFixtureCache.map((f,i)=>'<option value="'+i+'">'+safe(f.competition)+' · '+safe(f.home_team)+' vs '+safe(f.away_team)+' · '+safe(new Date(f.start_time).toLocaleString('es-AR',{dateStyle:'short',timeStyle:'short'}))+'</option>').join('');
+ if(previous!==''&&bookmakerFixtureCache[Number(previous)])select.value=previous;
+}
+function renderBookmakerOffers(records){
+ const box=document.getElementById('bookmaker-offers-list');
+ if(!box)return;
+ const offers=records.filter(r=>r.kind==='bookmaker_offer').sort((a,b)=>(b.created||0)-(a.created||0));
+ if(!offers.length){box.className='empty';box.textContent='Todavía no hay cuotas guardadas.';return;}
+ box.className='';
+ box.innerHTML=offers.map(q=>{
+  const line=q.line===null||q.line===undefined?'':' · línea '+safe(q.line);
+  const a=q.market==='moneyline'||q.market==='spread'?q.home_team:'Más de';
+  const b=q.market==='moneyline'||q.market==='spread'?q.away_team:'Menos de';
+  const prefix=q.market==='spread'?'Hándicap local '+(Number(q.line)>=0?'+':'')+safe(q.line):bookmakerMarketName(q.market)+line;
+  return '<article class="record"><strong>'+safe(q.house)+' · '+safe(q.home_team)+' vs '+safe(q.away_team)+'</strong>'+
+   '<p>'+safe(q.competition)+' · '+safe(prefix)+' · '+safe(q.settlement==='regulation_only'?'OT excluido':q.settlement==='includes_overtime'?'Incluye OT':'OT no confirmado')+'</p>'+
+   '<p>'+safe(a)+': '+Number(q.price_a).toFixed(2)+' · '+safe(b)+': '+Number(q.price_b).toFixed(2)+'</p>'+
+   '<p class="small">Capturada: '+safe(new Date(q.captured_at).toLocaleString('es-AR'))+'</p>'+
+   '<button class="action danger" type="button" data-delete-bookmaker="'+safe(q.key)+'">Eliminar</button></article>';
+ }).join('');
+}
+function updateBookmakerMarketLabels(){
+ const market=document.getElementById('bookmaker-market').value;
+ const lineLabel=document.getElementById('bookmaker-line-label');
+ const lineInput=document.getElementById('bookmaker-line');
+ const a=document.getElementById('bookmaker-price-a-label');
+ const b=document.getElementById('bookmaker-price-b-label');
+ if(market==='moneyline'){
+  lineLabel.classList.add('hidden');lineInput.classList.add('hidden');lineInput.required=false;
+ }else{
+  lineLabel.classList.remove('hidden');lineInput.classList.remove('hidden');lineInput.required=true;
+ }
+ if(market==='moneyline'||market==='spread'){
+  a.textContent='Cuota del equipo local';b.textContent='Cuota del equipo visitante';
+ }else{
+  a.textContent='Cuota Más de';b.textContent='Cuota Menos de';
+ }
+ if(market==='spread')lineLabel.textContent='Hándicap del equipo local (ej. +6.5)';
+ else if(market!=='moneyline')lineLabel.textContent='Línea de puntos';
+}
+document.getElementById('bookmaker-fixture').addEventListener('change',()=>{
+ const index=document.getElementById('bookmaker-fixture').value;
+ if(index==='')return;
+ const f=bookmakerFixtureCache[Number(index)];
+ if(!f)return;
+ document.getElementById('bookmaker-competition').value=f.competition||'';
+ document.getElementById('bookmaker-home').value=f.home_team||'';
+ document.getElementById('bookmaker-away').value=f.away_team||'';
+ const start=new Date(f.start_time);
+ if(Number.isFinite(start.getTime()))document.getElementById('bookmaker-start').value=localDateTimeValue(start);
+});
+document.getElementById('bookmaker-market').addEventListener('change',updateBookmakerMarketLabels);
+updateBookmakerMarketLabels();
+
+document.getElementById('bookmaker-offer-form').addEventListener('submit',async event=>{
+ event.preventDefault();
+ const message=document.getElementById('bookmaker-offer-message');
+ try{
+  const selected=document.getElementById('bookmaker-fixture').value;
+  const fixture=selected===''?null:bookmakerFixtureCache[Number(selected)];
+  const house=document.getElementById('bookmaker-house').value;
+  const competition=document.getElementById('bookmaker-competition').value.trim();
+  const home=document.getElementById('bookmaker-home').value.trim();
+  const away=document.getElementById('bookmaker-away').value.trim();
+  const startInput=document.getElementById('bookmaker-start').value;
+  const startDate=new Date(startInput);
+  if(!competition||!home||!away||home===away||!Number.isFinite(startDate.getTime()))throw new Error('Completá competición, equipos y fecha/hora del partido.');
+  const startTime=startDate.toISOString();
+  const market=document.getElementById('bookmaker-market').value;
+  const line=market==='moneyline'?null:Number(String(document.getElementById('bookmaker-line').value).replace(',','.'));
+  if(market!=='moneyline'&&!Number.isFinite(line))throw new Error('Ingresá la línea exacta que ofrece la casa.');
+  const priceA=Number(document.getElementById('bookmaker-price-a').value);
+  const priceB=Number(document.getElementById('bookmaker-price-b').value);
+  if(!(priceA>1.0001&&priceB>1.0001&&Number.isFinite(priceA)&&Number.isFinite(priceB)))throw new Error('Ingresá las dos cuotas decimales mayores que 1.00.');
+  const eventId=fixture?String(fixture.fixture_id||fixture.event_id):'manual:'+[
+   competition,home,away,startTime.slice(0,10)
+  ].map(v=>String(v).normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/[^a-z0-9]+/g,'-')).join(':');
+  const sides=(market==='moneyline'||market==='spread')?['home','away']:['over','under'];
+  const record={
+   key:'bookmaker:'+Date.now()+':'+Math.random().toString(36).slice(2,7),
+   kind:'bookmaker_offer',house,event_id:eventId,competition,
+   season:fixture?String(fixture.season||''):'',
+   home_team:home,away_team:away,start_time:startTime,
+   market,line,side_a:sides[0],side_b:sides[1],
+   price_a:priceA,price_b:priceB,
+   settlement:document.getElementById('bookmaker-settlement').value,
+   captured_at:new Date().toISOString(),created:Date.now()
+  };
+  await putRecord(record);
+  await refresh();
+  document.getElementById('bookmaker-price-a').value='';
+  document.getElementById('bookmaker-price-b').value='';
+  message.textContent='Guardado en este iPhone: '+house+' · '+home+' vs '+away+' · '+bookmakerMarketName(market)+'.';
+ }catch(error){message.textContent='No se pudo guardar: '+error.message;}
+});
+document.getElementById('bookmaker-offers-list').addEventListener('click',async event=>{
+ const key=event.target.dataset.deleteBookmaker;
+ if(!key)return;
+ if(!confirm('¿Eliminar esta cotización guardada?'))return;
+ await deleteKey(key);
+ await refresh();
+});
+
 document.querySelectorAll('nav button').forEach(btn=>btn.addEventListener('click',()=>{document.querySelectorAll('nav button').forEach(b=>b.classList.toggle('active',b===btn));document.querySelectorAll('main section').forEach(s=>s.classList.toggle('hidden',s.id!=='tab-'+btn.dataset.tab));}));
 document.getElementById('download-template').addEventListener('click',()=>{const type=document.getElementById('dataset-type').value;download(type+'_template.csv',HEADERS[type].join(',')+'\n','text/csv;charset=utf-8');});
 document.getElementById('import-csv').addEventListener('click',async()=>{const msg=document.getElementById('import-message'),file=document.getElementById('csv-file').files[0],type=document.getElementById('dataset-type').value;if(!file){msg.textContent='Seleccioná un archivo CSV primero.';return;}try{const rows=parseCSV(await file.text());if(!rows.length)throw new Error('El archivo está vacío.');const got=rows[0].map(v=>v.trim().replace(/^\uFEFF/,''));const expected=HEADERS[type];if(JSON.stringify(got)!==JSON.stringify(expected))throw new Error('Los encabezados no coinciden con la plantilla de '+type+'. Descargá la plantilla y revisá el orden y los nombres de las columnas.');const items=rows.slice(1).filter(r=>r.length===expected.length);if(!items.length)throw new Error('No se encontraron filas de datos válidas.');const stamp=Date.now();for(let i=0;i<items.length;i++){const obj=Object.fromEntries(expected.map((h,j)=>[h,items[i][j]??'']));await putRecord({key:`dataset:${type}:${stamp}:${i}`,kind:'dataset',type,data:obj,created:stamp});}msg.textContent=`Importación completada: ${items.length} filas de ${type}.`;await refresh();}catch(e){msg.textContent='No se pudo importar: '+e.message;}});
@@ -245,7 +390,7 @@ document.getElementById('pick-form').addEventListener('submit',async e=>{e.preve
 document.getElementById('pick-list').addEventListener('change',async e=>{const key=e.target.dataset.settle;if(!key)return;const records=await allRecords(),p=records.find(r=>r.key===key);if(p){p.outcome=e.target.value;await putRecord(p);await refresh();}});
 document.getElementById('pick-list').addEventListener('click',async e=>{const key=e.target.dataset.delete;if(!key)return;if(confirm('¿Eliminar este pick?')){await deleteKey(key);await refresh();}});
 document.getElementById('export-backup').addEventListener('click',async()=>{const payload={app:'Basketball Edge Analyst v20 iPhone UI',version:1,exported_at:new Date().toISOString(),records:await allRecords()};download('basketball-edge-v20-backup-'+new Date().toISOString().slice(0,10)+'.json',JSON.stringify(payload,null,2),'application/json');});
-document.getElementById('restore-backup').addEventListener('click',async()=>{const msg=document.getElementById('backup-message'),file=document.getElementById('backup-file').files[0];if(!file){msg.textContent='Seleccioná un archivo JSON primero.';return;}try{const data=JSON.parse(await file.text());if(!data||!Array.isArray(data.records))throw new Error('El archivo no parece ser un respaldo válido.');if(!confirm('La restauración reemplazará los datos locales actuales. ¿Continuar?'))return;await clearAll();for(const r of data.records){if(r&&typeof r.key==='string'&&(r.kind==='pick'||r.kind==='dataset'))await putRecord(r);}msg.textContent='Respaldo restaurado.';await refresh();}catch(e){msg.textContent='No se pudo restaurar: '+e.message;}});
+document.getElementById('restore-backup').addEventListener('click',async()=>{const msg=document.getElementById('backup-message'),file=document.getElementById('backup-file').files[0];if(!file){msg.textContent='Seleccioná un archivo JSON primero.';return;}try{const data=JSON.parse(await file.text());if(!data||!Array.isArray(data.records))throw new Error('El archivo no parece ser un respaldo válido.');if(!confirm('La restauración reemplazará los datos locales actuales. ¿Continuar?'))return;await clearAll();for(const r of data.records){if(r&&typeof r.key==='string'&&(r.kind==='pick'||r.kind==='dataset'||r.kind==='bookmaker_offer'))await putRecord(r);}msg.textContent='Respaldo restaurado.';await refresh();}catch(e){msg.textContent='No se pudo restaurar: '+e.message;}});
 const apiInput=document.getElementById('api-url');
 const apiMessage=document.getElementById('api-message');
 const savedApi=localStorage.getItem('bea-v20-api-url')||'';apiInput.value=savedApi;
@@ -367,6 +512,62 @@ async function checkHoopsApi(){
 }
 document.getElementById('check-hoopsapi').addEventListener('click',checkHoopsApi);
 checkHoopsApi();
+
+document.getElementById('build-bookmaker-parlay').addEventListener('click',async()=>{
+ const button=document.getElementById('build-bookmaker-parlay');
+ try{
+  const start=document.getElementById('parlay-start').value;
+  const end=document.getElementById('parlay-end').value;
+  const target=Number(document.getElementById('parlay-target').value);
+  const house=document.getElementById('bookmaker-house').value;
+  if(!start||!end)throw new Error('Indicá el horario desde y hasta en la sección de combinadas.');
+  if(!(target>1.01&&target<=100))throw new Error('La cuota objetivo debe estar entre 1,01 y 100.');
+  const records=await allRecords();
+  const games=records.filter(r=>r.kind==='dataset'&&r.type==='games').map(r=>r.data);
+  const teamStats=records.filter(r=>r.kind==='dataset'&&r.type==='team_stats').map(r=>r.data);
+  const offers=records.filter(r=>r.kind==='bookmaker_offer'&&r.house===house).map(q=>({
+   house:q.house,event_id:q.event_id,competition:q.competition,home_team:q.home_team,
+   away_team:q.away_team,start_time:q.start_time,market:q.market,line:q.line,
+   side_a:q.side_a,side_b:q.side_b,price_a:q.price_a,price_b:q.price_b,
+   settlement:q.settlement,captured_at:q.captured_at
+  }));
+  if(!games.length||!teamStats.length)throw new Error('Primero necesitás historial y estadísticas locales de equipos.');
+  if(!offers.length)throw new Error('No hay cuotas guardadas para '+house+'. Guardá al menos un mercado de un partido.');
+  const base=apiBase();localStorage.setItem('bea-v20-api-url',base);
+  button.disabled=true;button.textContent='Analizando cuotas de '+house+'…';parlayResult.innerHTML='';
+  parlayMessage.textContent='Enviando '+offers.length+' mercados guardados de '+house+' y el historial local al modelo…';
+  const response=await fetch(base+'/api/parlay/bookmaker-recommend',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+   house,window_start:new Date(start).toISOString(),window_end:new Date(end).toISOString(),
+   target_odds:target,simulations:10000,minimum_history_games:8,
+   games,team_stats:teamStats,offers
+  })});
+  let data;try{data=await response.json();}catch(_){throw new Error('El servidor devolvió una respuesta no válida.');}
+  if(!response.ok)throw new Error(data.detail||('HTTP '+response.status));
+  lastRecommendation=data;
+  const stats='<p>Casa: '+safe(data.house)+' · Partidos en ventana: '+data.matches_in_window+' · Analizados: '+data.matches_analysed+' · Selecciones elegibles: '+data.eligible_market_selections+'</p>'+
+   '<p>Mercados guardados: '+data.quotes_supplied+' · Cotizaciones sin regla OT confirmada excluidas: '+data.unconfirmed_settlement_quotes+'</p>';
+  const skips=data.skipped&&Object.keys(data.skipped).length?'<p class="small">No analizados: '+Object.entries(data.skipped).map(([k,v])=>safe(k)+' ('+v+')').join(' · ')+'</p>':'';
+  let body='<div class="panel"><div class="row"><h3>Resultado con cuotas de '+safe(house)+'</h3><span class="pill">'+safe(data.status)+'</span></div>'+stats+skips;
+  if(data.top_picks&&data.top_picks.length){
+   body+='<h3>Mejores picks individuales encontrados</h3>'+data.top_picks.slice(0,8).map((c,i)=>parlayCandidateHtml(c,i)).join('');
+  }else{
+   body+='<p class="notice">No se encontró una selección con ventaja estimada positiva entre las cuotas compatibles y el historial disponible. No se fuerza una recomendación.</p>';
+  }
+  if(data.best_parlay){
+   body+='<hr style="border-color:var(--line);border-width:1px 0 0;margin:14px 0"><h3>Combinada propuesta · '+safe(house)+'</h3>'+
+    '<p><strong>Cuota combinada:</strong> '+Number(data.best_parlay.combined_odds).toFixed(2)+' · <strong>Probabilidad estimada:</strong> '+pct(data.best_parlay.estimated_hit_probability)+'</p>'+
+    data.best_parlay.legs.map(c=>'<article class="record"><strong>'+safe(c.game)+'</strong><p>'+safe(c.competition)+' · '+safe(c.market_label)+' · '+safe(c.selection)+'</p><p>Cuota '+Number(c.odds).toFixed(2)+' · '+safe(c.bookmaker)+' · Probabilidad '+pct(c.probability)+'</p></article>').join('')+
+    '<button class="action" type="button" data-save-combo="1">Guardar las piernas de la combinada</button>';
+  }else{
+   body+='<p class="notice">No se pudo alcanzar la cuota objetivo con selecciones compatibles de esta casa.</p>';
+  }
+  body+='<h3>Advertencias del análisis</h3><ul>'+(data.warnings||[]).map(w=>'<li class="small">'+safe(w)+'</li>').join('')+'</ul></div>';
+  parlayResult.innerHTML=body;
+  parlayMessage.textContent='Análisis con cuotas propias terminado. No se consultó HoopsAPI.';
+ }catch(error){parlayMessage.textContent='No se pudo analizar las cuotas de la casa: '+error.message;}
+ finally{button.disabled=false;button.textContent='Buscar picks y combinada con cuotas guardadas de esta casa';}
+});
+
 
 let lastLocalPreview=null;
 function localCandidateHtml(c){
