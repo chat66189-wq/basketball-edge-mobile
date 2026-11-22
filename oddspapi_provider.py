@@ -22,6 +22,13 @@ BASE = "https://api.oddspapi.io/v4"
 SPORT_ID_BASKETBALL = 11
 MAX_ODDS_FIXTURES_PER_RUN = 8
 MAX_BOOKMAKERS_PER_FIXTURE = 8
+# Live OddsPapi tournament IDs for competitions already present in the mobile
+# app's local history. Names remain a fallback for other user-imported leagues.
+TOURNAMENT_IDS_BY_COMPETITION = {
+    "nba": {"132"},
+    "euroleague": {"138"},
+    "ncaadivision1women": {"21384"},
+}
 ODDS_RESPONSE_MAX_BYTES = 8 * 1024 * 1024
 OTHER_RESPONSE_MAX_BYTES = 16 * 1024 * 1024
 BOOKMAKER_PRIORITY = (
@@ -553,6 +560,10 @@ def games(
         for label in (preferred_competitions or [])
         if _competition_key(label)
     }
+    preferred_tournament_ids = set().union(*(
+        TOURNAMENT_IDS_BY_COMPETITION.get(key, set())
+        for key in preferred_keys
+    )) if preferred_keys else set()
     if not preferred_keys:
         raise OddsPapiError(
             "No hay competiciones con historial local para comparar. Importá primero datos de NBA, EuroLeague o NCAA femenina.",
@@ -592,7 +603,10 @@ def games(
 
     matching = [
         x for x in upcoming
-        if _fixture_competition_keys(x) & preferred_keys
+        if (
+            str(x.get("tournamentId") or "") in preferred_tournament_ids
+            or bool(_fixture_competition_keys(x) & preferred_keys)
+        )
     ]
     matching.sort(key=lambda x: str(x.get("startTime") or ""))
     available_competitions = sorted({
@@ -620,6 +634,10 @@ def games(
             "matching_fixture_count": len(matching),
             "matching_fixtures_with_odds": len(matching),
             "matching_competitions": matching_competitions,
+            "matching_tournament_ids": sorted({
+                str(x.get("tournamentId")) for x in matching if x.get("tournamentId") is not None
+            }),
+            "preferred_tournament_ids": sorted(preferred_tournament_ids),
             "available_competitions": available_competitions,
             "odds_fixtures_requested": 0,
             "odds_fixtures_with_markets": 0,
@@ -655,6 +673,10 @@ def games(
         "matching_fixture_count": len(matching),
         "matching_fixtures_with_odds": len(matching),
         "matching_competitions": matching_competitions,
+        "matching_tournament_ids": sorted({
+            str(x.get("tournamentId")) for x in matching if x.get("tournamentId") is not None
+        }),
+        "preferred_tournament_ids": sorted(preferred_tournament_ids),
         "available_competitions": available_competitions,
         "odds_fixtures_requested": len(selected),
         "odds_fixtures_with_markets": sum(bool(x.get("periods", {}).get("ft")) for x in normalized),
