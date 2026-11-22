@@ -110,7 +110,7 @@
           <div class="grid"><div><label for="bookmaker-home">Equipo local</label><input id="bookmaker-home" required placeholder="Boston Celtics"></div><div><label for="bookmaker-away">Equipo visitante</label><input id="bookmaker-away" required placeholder="Golden State Warriors"></div></div>
           <label for="bookmaker-market">Mercado que el motor puede evaluar</label>
           <select id="bookmaker-market">
-            <option value="moneyline">Ganador (resultado sin OT)</option>
+            <option value="moneyline">Ganador</option>
             <option value="spread">Hándicap de partido</option>
             <option value="total">Total de puntos del partido</option>
             <option value="home_total">Total de puntos del equipo local</option>
@@ -123,7 +123,13 @@
           <div class="actions"><button class="action" type="submit">Guardar este mercado y sus dos cuotas</button></div>
         </form>
         <div id="bookmaker-offer-message" class="fileline" aria-live="polite"></div>
-        <div class="record"><strong>Mercados guardados en este iPhone</strong><div id="bookmaker-offers-list" class="empty">Todavía no hay cuotas guardadas.</div></div>
+        <div class="record"><strong>Mercados guardados en este iPhone</strong>
+          <p class="small">Podés asignar una regla a las cotizaciones que siguen como “OT no confirmado”. Esto solo cambia la etiqueta local: hacelo únicamente después de verificar la regla del mercado en GanamosVIP/Azar247.</p>
+          <div class="grid"><div><label for="bulk-settlement-house">Casa</label><select id="bulk-settlement-house"><option value="GanamosVIP">GanamosVIP</option><option value="Azar247">Azar247</option></select></div><div><label for="bulk-settlement-value">Regla confirmada</label><select id="bulk-settlement-value"><option value="includes_overtime">Incluye OT</option><option value="regulation_only">OT excluido</option></select></div></div>
+          <div class="actions"><button class="action" id="bulk-settlement-apply" type="button">Aplicar a las cuotas sin confirmar de esta casa</button></div>
+          <div id="bulk-settlement-message" class="fileline" aria-live="polite"></div>
+          <div id="bookmaker-offers-list" class="empty">Todavía no hay cuotas guardadas.</div>
+        </div>
         <p class="notice">El motor puede calcular ganador, hándicap, total del partido y total por equipo con OT excluido o incluido, siempre que la regla esté confirmada. Las cotizaciones con regla desconocida se excluyen. Mercados de jugadores, mitades y cuartos aún no están modelados.</p>
       </div>
 
@@ -380,6 +386,19 @@ document.getElementById('bookmaker-offers-list').addEventListener('click',async 
  if(!key)return;
  if(!confirm('¿Eliminar esta cotización guardada?'))return;
  await deleteKey(key);
+ await refresh();
+});
+document.getElementById('bulk-settlement-apply').addEventListener('click',async()=>{
+ const house=document.getElementById('bulk-settlement-house').value;
+ const settlement=document.getElementById('bulk-settlement-value').value;
+ const message=document.getElementById('bulk-settlement-message');
+ const label=settlement==='includes_overtime'?'OT incluido':'OT excluido';
+ const records=await allRecords();
+ const pending=records.filter(r=>r.kind==='bookmaker_offer'&&r.house===house&&(!r.settlement||r.settlement==='unknown'));
+ if(!pending.length){message.textContent='No hay cotizaciones sin confirmar para '+house+'.';return;}
+ if(!confirm('Se cambiará la etiqueta de '+pending.length+' cotizaciones de '+house+' a '+label+'. Esto NO verifica la regla de la casa. ¿Ya la confirmaste para estos mercados?'))return;
+ for(const q of pending){q.settlement=settlement;await putRecord(q);}
+ message.textContent='Actualizadas '+pending.length+' cotizaciones de '+house+'. No se borró ningún dato.';
  await refresh();
 });
 
