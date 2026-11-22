@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import os
+import random
 import re
 import unicodedata
 from difflib import SequenceMatcher
@@ -36,7 +37,7 @@ def load_engine() -> None:
 
 load_engine()
 from scripts.edge_v15.team_model import (  # noqa: E402
-    TeamGame, LeaguePriors, fit_team_rates, fit_opponent_adjusted_ratings,
+    TeamGame, LeaguePriors, GameSimulation, fit_team_rates, fit_opponent_adjusted_ratings,
     project_game, simulate_game,
 )
 from scripts.edge_v15.market_pricing import price_game_market, ev_per_unit  # noqa: E402
@@ -58,6 +59,37 @@ app.add_middleware(
 
 TERMINAL_STATUSES = {"final", "finished", "complete", "completed", "ended", "ft", "post", "closed"}
 SUPPORTED_MARKETS = {"moneyline", "spread", "total", "home_total", "away_total"}
+
+
+def _simulate_game_for_settlement(projection, *, simulations: int, seed: int,
+                                  overtime_rule: str) -> GameSimulation:
+    """Simulate regulation, and add repeated five-minute OTs only for tied games."""
+    if overtime_rule not in {"regulation_only", "includes_overtime"}:
+        raise ValueError("settlement_rule_must_be_confirmed")
+    base = simulate_game(projection, simulations=simulations, seed=seed)
+    if overtime_rule == "regulation_only":
+        return base
+
+    rng = random.Random(seed ^ 0x5A17C0DE)
+    home_scores = list(base.home_scores)
+    away_scores = list(base.away_scores)
+    ot_pace_mean = projection.pace * (5.0 / 48.0)
+    ot_pace_sd = 3.0 * (5.0 / 48.0)
+    corr = 0.10
+    orth = math.sqrt(1.0 - corr * corr)
+    for index in range(simulations):
+        periods = 0
+        while home_scores[index] == away_scores[index]:
+            periods += 1
+            if periods > 20:
+                raise RuntimeError("overtime_simulation_exceeded_20_periods")
+            pace = max(0.1, rng.gauss(ot_pace_mean, ot_pace_sd))
+            z1, z2 = rng.gauss(0.0, 1.0), rng.gauss(0.0, 1.0)
+            home_ppp = max(0.3, projection.home_ppp + 0.075 * z1)
+            away_ppp = max(0.3, projection.away_ppp + 0.075 * (corr * z1 + orth * z2))
+            home_scores[index] += max(0, int(math.floor(pace * home_ppp + 0.5)))
+            away_scores[index] += max(0, int(math.floor(pace * away_ppp + 0.5)))
+    return GameSimulation(projection, home_scores, away_scores, simulations, seed, False)
 
 
 def _aware_datetime(value: Any, name: str) -> datetime:
@@ -702,7 +734,8 @@ def _fixture_market_groups(fixture: dict, now: datetime) -> dict:
 
 def _score_fixture(fixture: dict, all_games: list[dict], all_stats: list[dict],
                    simulations: int, minimum_history: int, now: datetime,
-                   manual_groups: dict | None = None) -> tuple[list[dict], str | None]:
+                   manual_groups: dict | None = None,
+                   overtime_rule: str = "regulation_only") -> tuple[list[dict], str | None]:
     start_time = _aware_datetime(fixture.get("start_time"), "fixture_start_time")
     history, counters, competition, season, home, away, priors, home_rates, away_rates = _history_scope_for_fixture(
         fixture, all_games, all_stats, start_time
@@ -720,7 +753,9 @@ def _score_fixture(fixture: dict, all_games: list[dict], all_stats: list[dict],
     projection = project_game(home_rates, away_rates, priors, adjusted_ratings=adjusted)
     fixture_id = str(fixture.get("game_id") or "")
     seed = 20261121 + sum(ord(ch) for ch in fixture_id)
-    simulation = simulate_game(projection, simulations=simulations, seed=seed)
+    simulation = _simulate_game_for_settlement(
+        projection, simulations=simulations, seed=seed, overtime_rule=overtime_rule
+    )
 
     groups = manual_groups if manual_groups is not None else _fixture_market_groups(fixture, now)
     output = []
@@ -742,7 +777,8 @@ def _score_fixture(fixture: dict, all_games: list[dict], all_stats: list[dict],
         for side in sides:
             try:
                 priced = price_game_market(
-                    simulation, market, side=side, line=line, overtime_rule="excluded"
+                    simulation, market, side=side, line=line,
+                    overtime_rule="included" if overtime_rule == "includes_overtime" else "excluded",
                 )
                 raw_win = float(priced.p_win)
                 raw_loss = float(priced.p_loss)
@@ -810,6 +846,7 @@ def _score_fixture(fixture: dict, all_games: list[dict], all_stats: list[dict],
                     "model_version": projection.model_version,
                     "rating_method": projection.rating_method,
                     "odds_captured_at": quote["captured_at"],
+                    "settlement": overtime_rule,
                     "score": edge * 0.6 + min(ev, 0.5) * 0.4,
                 })
     return output, None
@@ -1019,7 +1056,8 @@ async def recommend_bookmaker_parlay(request: Request):
             if market not in SUPPORTED_MARKETS:
                 unsupported_market_quotes += 1
                 continue
-            if str(item.get("settlement") or "unknown") != "regulation_only":
+            settlement = str(item.get("settlement") or "unknown")
+            if settlement not in {"regulation_only", "includes_overtime"}:
                 unconfirmed_settlement_quotes += 1
                 continue
 
@@ -1073,7 +1111,8 @@ async def recommend_bookmaker_parlay(request: Request):
                 line = _number(item.get("line"), "market_line", -10000)
             group_key = (market, None if line is None else round(line, 2))
             event_groups = groups_by_id.setdefault(event_id, {})
-            event_groups.setdefault(group_key, []).append({
+            settlement_groups = event_groups.setdefault(settlement, {})
+            settlement_groups.setdefault(group_key, []).append({
                 "bookmaker": house,
                 "captured_at": str(captured),
                 "price_a": price_a,
@@ -1097,31 +1136,32 @@ async def recommend_bookmaker_parlay(request: Request):
         team_name_skip_examples: list[str] = []
         analysed = 0
         for event_id, fixture in scan_items:
-            try:
-                candidates, reason = _score_fixture(
-                    fixture, all_games, all_stats, simulations, minimum_history, now,
-                    manual_groups=groups_by_id.get(event_id, {}),
-                )
-                if reason:
-                    key = reason.split(":")[0]
+            for settlement, manual_groups in groups_by_id.get(event_id, {}).items():
+                try:
+                    candidates, reason = _score_fixture(
+                        fixture, all_games, all_stats, simulations, minimum_history, now,
+                        manual_groups=manual_groups, overtime_rule=settlement,
+                    )
+                    if reason:
+                        key = reason.split(":")[0]
+                        skipped[key] = skipped.get(key, 0) + 1
+                        if key == "no_imported_history_for_competition_before_fixture" and len(history_skip_examples) < 5:
+                            history_skip_examples.append(reason)
+                        if key == "fixture_team_names_do_not_match_imported_history" and len(team_name_skip_examples) < 5:
+                            team_name_skip_examples.append(reason)
+                    else:
+                        analysed += 1
+                        all_candidates.extend(candidates)
+                except ValueError as exc:
+                    detail = str(exc)
+                    key = detail.split(":")[0]
                     skipped[key] = skipped.get(key, 0) + 1
                     if key == "no_imported_history_for_competition_before_fixture" and len(history_skip_examples) < 5:
-                        history_skip_examples.append(reason)
+                        history_skip_examples.append(detail)
                     if key == "fixture_team_names_do_not_match_imported_history" and len(team_name_skip_examples) < 5:
-                        team_name_skip_examples.append(reason)
-                else:
-                    analysed += 1
-                    all_candidates.extend(candidates)
-            except ValueError as exc:
-                detail = str(exc)
-                key = detail.split(":")[0]
-                skipped[key] = skipped.get(key, 0) + 1
-                if key == "no_imported_history_for_competition_before_fixture" and len(history_skip_examples) < 5:
-                    history_skip_examples.append(detail)
-                if key == "fixture_team_names_do_not_match_imported_history" and len(team_name_skip_examples) < 5:
-                    team_name_skip_examples.append(detail)
-            except Exception:
-                skipped["analysis_error"] = skipped.get("analysis_error", 0) + 1
+                        team_name_skip_examples.append(detail)
+                except Exception:
+                    skipped["analysis_error"] = skipped.get("analysis_error", 0) + 1
 
         best_by_selection = {}
         for candidate in all_candidates:
@@ -1182,7 +1222,7 @@ async def recommend_bookmaker_parlay(request: Request):
         warnings = [
             "EXPLORATORY_NOT_VALIDATED: el modelo no tiene validación walk-forward/holdout aprobada.",
             "Las cuotas se cargaron manualmente; no existe una conexión autenticada ni actualización automática con la casa.",
-            "Solo se evalúan ganador, hándicap, total del partido y totales por equipo de tiempo reglamentario, con liquidación OT excluida confirmada.",
+            "Solo se evalúan ganador, hándicap, total del partido y totales por equipo; cada cotización requiere regla de liquidación confirmada. OT incluido se simula con prórrogas de cinco minutos hasta desempatar.",
             "No se usan mercados de jugadores, mitades, cuartos, margen, par/impar ni otros mercados no modelados por el motor actual.",
             "La probabilidad estimada se mezcla con la probabilidad de mercado sin margen; sigue siendo exploratoria y no calibrada.",
             "La probabilidad combinada multiplica las probabilidades de las piernas y supone independencia aproximada entre partidos.",
@@ -1192,7 +1232,7 @@ async def recommend_bookmaker_parlay(request: Request):
         if unconfirmed_settlement_quotes:
             warnings.append(
                 str(unconfirmed_settlement_quotes)
-                + " cotizaciones se excluyeron porque la regla de prórroga no estaba confirmada como OT excluida."
+                + " cotizaciones se excluyeron porque la regla de prórroga no estaba confirmada."
             )
         if unsupported_market_quotes:
             warnings.append(
