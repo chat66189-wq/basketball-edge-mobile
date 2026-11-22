@@ -525,7 +525,13 @@ def _normalise_competition(value: Any) -> str:
     # Normalize NCAA Division I women's labels used by different fixture feeds.
     # Never merge NCAA Division II/III or men's competitions into this history.
     if "ncaa" in label:
-        ncaa_gender = "women" if ("women" in label or "female" in label) else "men" if ("men" in label or "male" in label) else ""
+        ncaa_gender = "women" if (
+            "women" in label or "female" in label
+            or label.endswith(("ncaaw", "ncaadiw", "ncaad1w", "ncaadivisioniw"))
+        ) else "men" if (
+            "men" in label or "male" in label
+            or label.endswith(("ncaam", "ncaadim", "ncaad1m", "ncaadivisionim"))
+        ) else ""
         if ncaa_gender:
             if any(token in label for token in ("divisioniii", "division3", "diviii", "div3", "ncaa3")):
                 division = "3"
