@@ -82,7 +82,18 @@ def _read_basketball_market_array(response, max_bytes: int = 128 * 1024 * 1024) 
                 if not isinstance(item, dict):
                     raise OddsPapiError("OddsPapi devolvió un elemento inesperado en /markets.")
                 if str(item.get("sportId") or "") == str(SPORT_ID_BASKETBALL):
-                    selected.append(item)
+                    market_name = str(item.get("marketName") or "")
+                    period = str(item.get("period") or "").lower()
+                    family = _market_family(market_name)
+                    if family and period in {"fulltime", "full_time", "match", ""}:
+                        # Keep only the small subset consumed by the model rather
+                        # than retaining every basketball period/market row.
+                        selected.append({
+                            "sportId": SPORT_ID_BASKETBALL,
+                            "marketId": item.get("marketId"),
+                            "marketName": market_name,
+                            "period": period,
+                        })
                 pos = end
                 expect_value = False
                 allow_empty_end = False
@@ -123,7 +134,7 @@ def _read_basketball_market_array(response, max_bytes: int = 128 * 1024 * 1024) 
     if not started or not closed:
         raise OddsPapiError("OddsPapi cerró la respuesta /markets antes de completar el array JSON.")
     if not selected:
-        raise OddsPapiError("El catálogo /markets no contiene mercados de básquet (sportId 11).")
+        raise OddsPapiError("El catálogo /markets no contiene mercados principales de partido completo para básquet.")
     return selected
 
 
