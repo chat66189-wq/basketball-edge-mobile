@@ -19,7 +19,16 @@ from urllib.request import Request, urlopen
 
 BASE = "https://api.oddspapi.io/v4"
 SPORT_ID_BASKETBALL = 11
-MAX_ODDS_FIXTURES_PER_RUN = 20
+MAX_ODDS_FIXTURES_PER_RUN = 8
+MAX_BOOKMAKERS_PER_FIXTURE = 8
+ODDS_RESPONSE_MAX_BYTES = 8 * 1024 * 1024
+OTHER_RESPONSE_MAX_BYTES = 16 * 1024 * 1024
+BOOKMAKER_PRIORITY = (
+    "bet365.bet.ar", "bet365", "betano", "pinnacle",
+    "betsson", "1xbet", "betplay", "apuestatotal",
+    "bwin", "888sport", "22bet", "18bet", "marathonbet",
+    "unibet", "williamhill", "betfair-ex",
+)
 _CACHE: dict[str, tuple[float, object]] = {}
 _LOCK = threading.Lock()
 
@@ -175,11 +184,19 @@ def _get(path: str, params: dict | None = None, ttl: int = 0, unmetered: bool = 
             if path.strip("/") == "markets":
                 data = _read_basketball_market_array(response)
             else:
-                raw_bytes = response.read(32 * 1024 * 1024 + 1)
-                if len(raw_bytes) > 32 * 1024 * 1024:
+                response_limit = (
+                    ODDS_RESPONSE_MAX_BYTES
+                    if path.strip("/") == "odds"
+                    else OTHER_RESPONSE_MAX_BYTES
+                )
+                raw_bytes = response.read(response_limit + 1)
+                if len(raw_bytes) > response_limit:
+                    limit_mb = response_limit // (1024 * 1024)
                     raise OddsPapiError(
                         f"OddsPapi devolvió una respuesta demasiado grande en {endpoint} "
-                        f"(HTTP {response_status}; Content-Type {content_type}; límite 32 MB)."
+                        f"(HTTP {response_status}; Content-Type {content_type}; "
+                        f"límite seguro {limit_mb} MB). Se redujeron las casas consultadas; "
+                        "no se reinició el servidor ni se procesó una respuesta incompleta."
                     )
                 try:
                     raw = raw_bytes.decode("utf-8-sig")
@@ -326,6 +343,35 @@ def _market_metadata() -> dict[str, str]:
     }
 
 
+def _select_bookmakers(available_bookmakers: list[str]) -> list[str]:
+    """Choose a small, deterministic set of subscribed sportsbook slugs."""
+    exact = {
+        str(name).strip().lower(): str(name).strip()
+        for name in available_bookmakers
+        if str(name).strip()
+    }
+    chosen: list[str] = []
+    for preferred in BOOKMAKER_PRIORITY:
+        slug = exact.get(preferred.lower())
+        if slug and slug not in chosen:
+            chosen.append(slug)
+        if len(chosen) >= MAX_BOOKMAKERS_PER_FIXTURE:
+            break
+    if len(chosen) < MAX_BOOKMAKERS_PER_FIXTURE:
+        # Fill from the user's actual subscription, preferring sportsbook
+        # slugs and excluding obvious casino-only entries.
+        remainder = sorted(
+            (
+                slug for slug in exact.values()
+                if slug not in chosen
+                and "casino" not in slug.lower()
+            ),
+            key=str.lower,
+        )
+        chosen.extend(remainder[:MAX_BOOKMAKERS_PER_FIXTURE - len(chosen)])
+    return chosen[:MAX_BOOKMAKERS_PER_FIXTURE]
+
+
 def _fresh_timestamp(value: str | None, now: datetime) -> bool:
     if not value:
         return False
@@ -442,8 +488,14 @@ def games(window_start: datetime, window_end: datetime) -> dict:
         and x.get("statusId") == 0
     ]
     upcoming.sort(key=lambda x: str(x.get("startTime") or ""))
-    market_families = _market_metadata()
     account = account_status()
+    available_bookmakers = account.get("bookmakers_available_in_plan") or []
+    selected_bookmakers = _select_bookmakers(available_bookmakers)
+    if not selected_bookmakers:
+        raise OddsPapiError(
+            "OddsPapi no devolvió casas de apuestas habilitadas para esta suscripción."
+        )
+    market_families = _market_metadata()
     remaining = int(account.get("requests_remaining") or 0)
     # Reserve one request for /fixtures and one for /markets. Avoid consuming the
     # entire free quota on a single scan.
@@ -451,9 +503,22 @@ def games(window_start: datetime, window_end: datetime) -> dict:
     selected = [x for x in upcoming if x.get("hasOdds")][:odds_limit]
     normalized = []
     for fixture in selected:
-        odds = _get("odds", {"fixtureId": fixture.get("fixtureId"), "language": "en", "verbosity": 3}, ttl=75)
+        # Never cache the raw /odds payload: it can contain thousands of
+        # markets per bookmaker. Process one fixture, normalize it, then let
+        # the raw response be released before fetching the next fixture.
+        odds = _get(
+            "odds",
+            {
+                "fixtureId": fixture.get("fixtureId"),
+                "bookmakers": ",".join(selected_bookmakers),
+                "language": "en",
+                "verbosity": 3,
+            },
+            ttl=0,
+        )
         if isinstance(odds, dict):
             normalized.append(_normalise_odds_fixture(fixture, odds, market_families, now))
+        del odds
         time.sleep(0.55)
     return {
         "count": len(upcoming),
@@ -461,5 +526,7 @@ def games(window_start: datetime, window_end: datetime) -> dict:
         "odds_fixtures_requested": len(selected),
         "odds_fixtures_with_markets": sum(bool(x.get("periods", {}).get("ft")) for x in normalized),
         "quota_remaining_before_scan": remaining,
+        "bookmakers_requested": selected_bookmakers,
+        "bookmakers_limit": MAX_BOOKMAKERS_PER_FIXTURE,
         "scan_cap": MAX_ODDS_FIXTURES_PER_RUN,
     }
