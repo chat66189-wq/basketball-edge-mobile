@@ -452,11 +452,7 @@ def _normalise_competition(value: Any) -> str:
     if "wnba" in label:
         return "wnba"
 
-    gender = ""
-    if "women" in label or "female" in label:
-        gender = "women"
-    elif "mens" in label or label.endswith("men") or "male" in label:
-        gender = "men"
+    gender = "women" if ("women" in label or "female" in label) else ""
 
     if "euroleague" in label:
         return "euroleague" + gender
