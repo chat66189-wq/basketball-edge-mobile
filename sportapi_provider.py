@@ -232,3 +232,74 @@ def sync(league,season=None,date=None,limit=20):
         "quota": quota,
         "warnings": list(dict.fromkeys(warnings)),
     }
+
+
+def fixtures(league,date,limit=80):
+    """Fetch only the scheduled games for one league/date; one SportAPI request, no box-score fan-out."""
+    league=str(league or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9-]{1,80}",league):
+        raise SportAPIError("Seleccioná una competición válida.",422)
+    try:
+        datetime.strptime(str(date),"%Y-%m-%d")
+        limit=int(limit)
+    except (TypeError,ValueError):
+        raise SportAPIError("Indicá una fecha AAAA-MM-DD y un límite válido.",422) from None
+    if not 1<=limit<=100:
+        raise SportAPIError("El límite del calendario es de 1 a 100 partidos.",422)
+
+    listing=_get("basketball/games/date/"+str(date),
+        {"tz":"America/Argentina/Cordoba","league":league},120)
+    raw=listing.get("data") or []
+    if not isinstance(raw,list):
+        raise SportAPIError("Calendario de partidos inválido.")
+    from datetime import timezone
+    from zoneinfo import ZoneInfo
+    local_zone=ZoneInfo("America/Argentina/Cordoba")
+    now=datetime.now(timezone.utc)
+    final_statuses={"FT","AOT","AWD","CANC","CANCELLED","POSTPONED","PST"}
+    results=[]
+    for game in raw:
+        if not isinstance(game,dict):
+            continue
+        league_data=game.get("league") or {}
+        if str(league_data.get("slug") or league_data.get("id") or "")!=league:
+            continue
+        status=str(game.get("status") or "").upper()
+        if status in final_statuses:
+            continue
+        start=game.get("start")
+        home=game.get("home") or {}
+        away=game.get("away") or {}
+        gid=game.get("id")
+        if gid is None or not start or not home.get("name") or not away.get("name"):
+            continue
+        try:
+            parsed=datetime.fromisoformat(str(start).replace("Z","+00:00"))
+            if parsed.tzinfo is None or parsed.utcoffset() is None:
+                parsed=parsed.replace(tzinfo=local_zone)
+            parsed=parsed.astimezone(timezone.utc)
+        except (TypeError,ValueError):
+            continue
+        # Do not forecast games already in progress or already started.
+        if parsed<=now:
+            continue
+        results.append({
+            "fixture_id":"sportapi-"+str(gid),
+            "competition":str(league_data.get("name") or league),
+            "season":str(game.get("season") or ""),
+            "start_time":parsed.isoformat(),
+            "home_team":str(home["name"]),
+            "away_team":str(away["name"]),
+            "status":status or "SCHEDULED",
+        })
+        if len(results)>=limit:
+            break
+    results.sort(key=lambda item:item["start_time"])
+    return {
+        "provider":"SportAPI.ai",
+        "date":str(date),
+        "count":len(results),
+        "fixtures":results,
+        "quota":listing.get("_quota"),
+        "note":"Se consultó solo el calendario; no se descargaron estadísticas ni cuotas.",
+    }
