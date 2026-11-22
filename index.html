@@ -658,11 +658,12 @@ document.getElementById('build-parlay').addEventListener('click',async()=>{
   let data;try{data=await response.json();}catch(_){throw new Error('El servidor devolvió una respuesta no válida.');}
   if(!response.ok)throw new Error(data.detail||('HTTP '+response.status));
   lastRecommendation=data;
-  const stats='<p>Partidos con cuotas en la ventana: '+data.matches_in_window+' · Analizados: '+data.matches_analysed+' · Mercados elegibles: '+data.eligible_market_selections+'</p>';
+  const stats='<p>Partidos con cuotas en la ventana: '+data.matches_in_window+' · Competiciones compatibles: '+Number(data.matches_matching_imported_competitions||0)+' · Analizados: '+data.matches_analysed+' · Mercados elegibles: '+data.eligible_market_selections+'</p>';
   const skips=data.skipped&&Object.keys(data.skipped).length?'<p class="small">No analizados: '+Object.entries(data.skipped).map(([k,v])=>safe(k)+' ('+v+')').join(' · ')+'</p>':'';
   const diagnostic='<details class="small" style="margin:10px 0" open><summary>Diagnóstico de datos y competiciones</summary>'+
    '<p>Filas locales: '+Number(data.local_games_count||0)+' partidos · '+Number(data.local_team_stats_count||0)+' registros de equipo.</p>'+
    '<p>Competiciones importadas: '+(data.imported_competitions||[]).map(safe).join(' / ')+'</p>'+
+   '<p>Competiciones con historial suficiente: '+(data.modelable_competitions||[]).map(safe).join(' / ')+'</p>'+
    '<p>Partidos de la fuente con competición compatible con el historial: '+Number(data.matches_matching_imported_competitions||0)+'</p>'+
    '<p>Competiciones revisadas: '+(data.fixture_competitions_scanned||[]).map(safe).join(' / ')+'</p>'+
    '<p>Competiciones detectadas en la ventana: '+(data.fixture_competitions_in_window||[]).map(safe).join(' / ')+'</p>'+
