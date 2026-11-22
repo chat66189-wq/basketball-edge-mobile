@@ -565,6 +565,78 @@ def _normalise_competition(value: Any) -> str:
     return label + gender
 
 
+def _modelable_competition_labels(
+    all_games: list[dict[str, Any]],
+    all_stats: list[dict[str, Any]],
+    minimum_history: int,
+    as_of: datetime,
+) -> tuple[list[str], dict[str, dict[str, int]]]:
+    """Keep only leagues with at least two teams backed by complete, point-in-time box scores."""
+    lookback_start = as_of - timedelta(days=400)
+    stats_by_event: dict[str, dict[str, dict[str, Any]]] = {}
+    for row in all_stats:
+        if not isinstance(row, dict):
+            continue
+        event_id = str(row.get("event_id") or "").strip()
+        team = str(row.get("team") or "").strip()
+        if event_id and team:
+            stats_by_event.setdefault(event_id, {})[team] = row
+
+    by_competition: dict[str, dict[str, Any]] = {}
+    for game in all_games:
+        if not isinstance(game, dict):
+            continue
+        label = str(game.get("competition") or "").strip()
+        comp_key = _normalise_competition(label)
+        if not label or not comp_key:
+            continue
+        bucket = by_competition.setdefault(
+            comp_key, {"labels": set(), "team_events": {}, "complete_games": 0}
+        )
+        bucket["labels"].add(label)
+        if str(game.get("status") or "").strip().lower() not in TERMINAL_STATUSES:
+            continue
+        event_id = str(game.get("event_id") or "").strip()
+        home = str(game.get("home_team") or "").strip()
+        away = str(game.get("away_team") or "").strip()
+        if not event_id or not home or not away or home == away:
+            continue
+        try:
+            played = _historical_datetime(game.get("event_time"), "event_time")
+            if played < lookback_start or played + timedelta(hours=24) >= as_of:
+                continue
+            per_team = stats_by_event.get(event_id, {})
+            home_row, away_row = per_team.get(home), per_team.get(away)
+            if not home_row or not away_row:
+                continue
+            _number(home_row.get("points"), "home_points")
+            _number(away_row.get("points"), "away_points")
+            _number(home_row.get("possessions"), "home_possessions", 1.0)
+            _number(away_row.get("possessions"), "away_possessions", 1.0)
+        except (TypeError, ValueError):
+            continue
+
+        bucket["complete_games"] += 1
+        bucket["team_events"].setdefault(home, set()).add(event_id)
+        bucket["team_events"].setdefault(away, set()).add(event_id)
+
+    eligible_labels: list[str] = []
+    audit: dict[str, dict[str, int]] = {}
+    for comp_key, bucket in by_competition.items():
+        teams_ready = sum(
+            1 for event_ids in bucket["team_events"].values()
+            if len(event_ids) >= minimum_history
+        )
+        audit[comp_key] = {
+            "complete_games": int(bucket["complete_games"]),
+            "teams_with_minimum_history": teams_ready,
+        }
+        if teams_ready >= 2:
+            eligible_labels.extend(bucket["labels"])
+
+    return sorted(set(eligible_labels)), audit
+
+
 def _positive_price(value: Any) -> float | None:
     try:
         price = float(value)
@@ -1019,10 +1091,9 @@ async def preview_parlay(request: Request):
             "fixtures_analysed": len(candidates),
             "local_games_count": len(all_games),
             "local_team_stats_count": len(all_stats),
-            "imported_competitions": sorted({
-                str(g.get("competition") or "").strip()
-                for g in all_games if isinstance(g, dict) and str(g.get("competition") or "").strip()
-            }),
+            "imported_competitions": imported_competition_labels,
+            "modelable_competitions": modelable_competition_labels,
+            "competition_history_audit": competition_history_audit,
             "skipped": skipped,
             "skip_examples": examples,
             "candidates": candidates[:30],
@@ -1371,22 +1442,35 @@ async def recommend_parlay(request: Request):
             for g in all_games
             if isinstance(g, dict) and str(g.get("competition") or "").strip()
         })
+        modelable_competition_labels, competition_history_audit = _modelable_competition_labels(
+            all_games, all_stats, minimum_history, start_time
+        )
         imported_competitions = {
-            _normalise_competition(label) for label in imported_competition_labels
+            _normalise_competition(label) for label in modelable_competition_labels
         }
 
         provider_name = "HoopsAPI"
         overtime_rule = "regulation_only"
         if os.environ.get("ODDSPAPI_API_KEY", "").strip():
-            from oddspapi_provider import games as fetch_odds_games, OddsPapiError
-            # Filter the fixture feed by the competitions represented in the
-            # iPhone's imported history BEFORE requesting bookmaker odds.
-            # This prevents spending quota on leagues the local model cannot score.
-            feed = await run_in_threadpool(
-                fetch_odds_games, start_time, end_time, imported_competition_labels
-            )
             provider_name = "OddsPapi"
             overtime_rule = "includes_overtime"
+        if not modelable_competition_labels:
+            # Abstain before external calls when no league has enough complete
+            # history; do not spend bookmaker quota on games the model rejects.
+            feed = {
+                "games": [], "count": 0, "matching_fixture_count": 0,
+                "matching_competitions": [], "available_competitions": [],
+                "odds_fixtures_requested": 0, "odds_fixtures_with_markets": 0,
+                "quota_remaining_before_scan": None, "bookmakers_requested": [],
+                "scan_cap": 0, "markets_catalog_loaded": False,
+            }
+        elif provider_name == "OddsPapi":
+            from oddspapi_provider import games as fetch_odds_games
+            # Filter by leagues with complete, sufficiently deep history before
+            # OddsPapi retrieves any individual bookmaker odds.
+            feed = await run_in_threadpool(
+                fetch_odds_games, start_time, end_time, modelable_competition_labels
+            )
         else:
             from hoopsapi_provider import games as fetch_odds_games
             feed = await run_in_threadpool(fetch_odds_games)
@@ -1506,10 +1590,26 @@ async def recommend_parlay(request: Request):
             "El historial usa una ventana móvil de hasta 400 días de la misma competición e incluye temporadas anteriores; los cambios de plantel no están modelados.",
             "Las cuotas se filtran por captura de hasta 60 minutos y pueden cambiar antes de apostar.",
         ]
-        if provider_name == "OddsPapi" and int(feed.get("matching_fixture_count") or 0) == 0:
+        excluded_competitions = sorted(
+            label for label in imported_competition_labels
+            if _normalise_competition(label) not in imported_competitions
+        )
+        if excluded_competitions:
             warnings.append(
-                "OddsPapi no encontró partidos con cuotas en las competiciones que tienen historial local: "
-                + ", ".join(imported_competition_labels)
+                "Se excluyeron antes de consultar cuotas las competiciones sin al menos dos equipos "
+                f"con {minimum_history} partidos completos en los últimos 400 días: "
+                + ", ".join(excluded_competitions)
+                + "."
+            )
+        if not modelable_competition_labels:
+            warnings.append(
+                f"Ninguna competición importada tiene dos equipos con al menos {minimum_history} partidos "
+                "completos y disponibles antes del inicio de la ventana. No se consultaron APIs ni cuotas."
+            )
+        elif provider_name == "OddsPapi" and int(feed.get("matching_fixture_count") or 0) == 0:
+            warnings.append(
+                "OddsPapi no encontró partidos con cuotas en las competiciones con historial suficiente: "
+                + ", ".join(modelable_competition_labels)
                 + ". No se consultaron cuotas de ligas ajenas al historial."
             )
         elif provider_name == "OddsPapi" and int(feed.get("odds_fixtures_requested") or 0) == 0:
