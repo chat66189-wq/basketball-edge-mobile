@@ -460,7 +460,7 @@ def _normalise_odds_fixture(fixture: dict, odds: dict, market_families: dict[str
         "game_id": str(fixture.get("fixtureId") or ""),
         "home": home,
         "away": away,
-        "competition": str(fixture.get("tournamentName") or fixture.get("categoryName") or "").strip(),
+        "competition": _fixture_competition_label(fixture),
         "start_time": fixture.get("startTime"),
         "updated_at": fixture.get("updatedAt"),
         "periods": periods,
@@ -485,7 +485,13 @@ def _competition_key(value: str) -> str:
     if "nba" in compact and not any(token in compact for token in ("nbagleague", "nbawomen")):
         return "nba"
     if "ncaa" in compact:
-        gender = "women" if ("women" in compact or "female" in compact or compact.endswith("ncaaW".lower())) else "men" if "men" in compact or "male" in compact else ""
+        gender = "women" if (
+            "women" in compact or "female" in compact
+            or compact.endswith(("ncaaw", "ncaadiw", "ncaad1w", "ncaadivisioniw"))
+        ) else "men" if (
+            "men" in compact or "male" in compact
+            or compact.endswith(("ncaam", "ncaadim", "ncaad1m", "ncaadivisionim"))
+        ) else ""
         if gender:
             if any(token in compact for token in ("divisioniii", "division3", "diviii", "div3", "ncaa3")):
                 division = "3"
@@ -500,14 +506,38 @@ def _competition_key(value: str) -> str:
         if compact.endswith(suffix):
             compact = compact[:-len(suffix)]
             break
-    if compact.endswith(("womens", "women", "female")):
-        return compact[:-5] + "women" if compact.endswith("womens") else compact[:-5] + "women"
+    if compact.endswith("womens"):
+        return compact[:-6] + "women"
+    if compact.endswith("female"):
+        return compact[:-6] + "women"
+    if compact.endswith("women"):
+        return compact
+    if compact.endswith("mens"):
+        return compact[:-4] + "men"
+    if compact.endswith("male"):
+        return compact[:-4] + "men"
     return compact
 
 
-def _fixture_competition_key(fixture: dict) -> str:
-    labels = (fixture.get("tournamentName"), fixture.get("tournamentSlug"))
-    return next((_competition_key(label) for label in labels if _competition_key(label)), _competition_key(fixture.get("categoryName")))
+def _fixture_competition_keys(fixture: dict) -> set[str]:
+    labels = (
+        fixture.get("tournamentName"),
+        fixture.get("tournamentSlug"),
+        fixture.get("categoryName"),
+    )
+    return {_competition_key(label) for label in labels if _competition_key(label)}
+
+
+def _fixture_competition_label(fixture: dict, preferred_keys: set[str] | None = None) -> str:
+    labels = (
+        fixture.get("tournamentName"),
+        fixture.get("tournamentSlug"),
+        fixture.get("categoryName"),
+    )
+    for label in labels:
+        if label and (preferred_keys is None or _competition_key(label) in preferred_keys):
+            return str(label).strip()
+    return next((str(label).strip() for label in labels if label), "")
 
 
 def games(
@@ -562,18 +592,18 @@ def games(
 
     matching = [
         x for x in upcoming
-        if _fixture_competition_key(x) in preferred_keys
+        if _fixture_competition_keys(x) & preferred_keys
     ]
     matching.sort(key=lambda x: str(x.get("startTime") or ""))
     available_competitions = sorted({
-        str(x.get("tournamentName") or x.get("tournamentSlug") or "").strip()
+        _fixture_competition_label(x)
         for x in upcoming
-        if str(x.get("tournamentName") or x.get("tournamentSlug") or "").strip()
+        if _fixture_competition_label(x)
     })
     matching_competitions = sorted({
-        str(x.get("tournamentName") or x.get("tournamentSlug") or "").strip()
+        _fixture_competition_label(x, preferred_keys)
         for x in matching
-        if str(x.get("tournamentName") or x.get("tournamentSlug") or "").strip()
+        if _fixture_competition_label(x, preferred_keys)
     })
 
     remaining = int(account.get("requests_remaining") or 0)
