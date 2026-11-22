@@ -7,6 +7,7 @@ the provider's monthly request quota.
 from __future__ import annotations
 
 import json
+import codecs
 import os
 import re
 import threading
@@ -29,6 +30,103 @@ class OddsPapiError(Exception):
         self.status = status
 
 
+def _read_basketball_market_array(response, max_bytes: int = 128 * 1024 * 1024) -> list[dict]:
+    """Stream the global /markets JSON array and retain only basketball rows.
+
+    The provider documents /markets as a global catalogue (no sportId filter).
+    Keeping the whole catalogue in memory is unnecessary and a fixed 20 MB read
+    truncates larger valid responses.
+    """
+    text_decoder = codecs.getincrementaldecoder("utf-8-sig")()
+    json_decoder = json.JSONDecoder()
+    buffer = ""
+    pos = 0
+    total_bytes = 0
+    started = False
+    expect_value = True
+    allow_empty_end = True
+    closed = False
+    selected: list[dict] = []
+
+    def consume(final: bool = False) -> None:
+        nonlocal buffer, pos, started, expect_value, allow_empty_end, closed
+        while True:
+            while pos < len(buffer) and buffer[pos].isspace():
+                pos += 1
+            if pos >= len(buffer):
+                break
+            if not started:
+                if buffer[pos] != "[":
+                    raise OddsPapiError("OddsPapi devolvió un catálogo /markets que no es un array JSON.")
+                started = True
+                pos += 1
+                continue
+            if closed:
+                if buffer[pos:].strip():
+                    raise OddsPapiError("OddsPapi agregó contenido después del array JSON de /markets.")
+                pos = len(buffer)
+                break
+            if expect_value:
+                if buffer[pos] == "]":
+                    if not allow_empty_end:
+                        raise OddsPapiError("OddsPapi devolvió un array /markets con una coma final.")
+                    closed = True
+                    pos += 1
+                    continue
+                try:
+                    item, end = json_decoder.raw_decode(buffer, pos)
+                except json.JSONDecodeError:
+                    if final:
+                        raise OddsPapiError("OddsPapi devolvió un array /markets incompleto o JSON inválido.") from None
+                    break
+                if not isinstance(item, dict):
+                    raise OddsPapiError("OddsPapi devolvió un elemento inesperado en /markets.")
+                if str(item.get("sportId") or "") == str(SPORT_ID_BASKETBALL):
+                    selected.append(item)
+                pos = end
+                expect_value = False
+                allow_empty_end = False
+            else:
+                if buffer[pos] == ",":
+                    pos += 1
+                    expect_value = True
+                    allow_empty_end = False
+                elif buffer[pos] == "]":
+                    closed = True
+                    pos += 1
+                else:
+                    raise OddsPapiError("OddsPapi devolvió separadores inválidos en el array /markets.")
+        if pos > 65536:
+            buffer = buffer[pos:]
+            pos = 0
+
+    while True:
+        chunk = response.read(65536)
+        if not chunk:
+            break
+        total_bytes += len(chunk)
+        if total_bytes > max_bytes:
+            raise OddsPapiError(
+                "El catálogo global /markets de OddsPapi supera el límite seguro de lectura (128 MB)."
+            )
+        try:
+            buffer += text_decoder.decode(chunk)
+        except UnicodeDecodeError:
+            raise OddsPapiError("OddsPapi devolvió texto UTF-8 inválido en /markets.") from None
+        consume()
+
+    try:
+        buffer += text_decoder.decode(b"", final=True)
+    except UnicodeDecodeError:
+        raise OddsPapiError("OddsPapi devolvió texto UTF-8 incompleto en /markets.") from None
+    consume(final=True)
+    if not started or not closed:
+        raise OddsPapiError("OddsPapi cerró la respuesta /markets antes de completar el array JSON.")
+    if not selected:
+        raise OddsPapiError("El catálogo /markets no contiene mercados de básquet (sportId 11).")
+    return selected
+
+
 def _get(path: str, params: dict | None = None, ttl: int = 0, unmetered: bool = False):
     api_key = os.environ.get("ODDSPAPI_API_KEY", "").strip()
     if not api_key:
@@ -43,26 +141,34 @@ def _get(path: str, params: dict | None = None, ttl: int = 0, unmetered: bool = 
     endpoint = "/" + path.lstrip("/")
     try:
         request = Request(url, headers={"Accept": "application/json"}, method="GET")
-        with urlopen(request, timeout=45) as response:
+        with urlopen(request, timeout=60) as response:
             response_status = getattr(response, "status", 200)
             content_type = response.headers.get("Content-Type", "no informado")
-            raw_bytes = response.read(20 * 1024 * 1024)
-        try:
-            raw = raw_bytes.decode("utf-8-sig")
-        except UnicodeDecodeError:
-            raise OddsPapiError(
-                f"OddsPapi devolvió una codificación no válida en {endpoint} "
-                f"(HTTP {response_status}; Content-Type {content_type})."
-            ) from None
-        try:
-            data = json.loads(raw)
-        except json.JSONDecodeError:
-            # Do not include the URL or response body here: the API key is a query parameter.
-            raise OddsPapiError(
-                f"OddsPapi devolvió contenido que no es JSON en {endpoint} "
-                f"(HTTP {response_status}; Content-Type {content_type}; "
-                f"{len(raw_bytes)} bytes)."
-            ) from None
+            if path.strip("/") == "markets":
+                data = _read_basketball_market_array(response)
+            else:
+                raw_bytes = response.read(32 * 1024 * 1024 + 1)
+                if len(raw_bytes) > 32 * 1024 * 1024:
+                    raise OddsPapiError(
+                        f"OddsPapi devolvió una respuesta demasiado grande en {endpoint} "
+                        f"(HTTP {response_status}; Content-Type {content_type}; límite 32 MB)."
+                    )
+                try:
+                    raw = raw_bytes.decode("utf-8-sig")
+                except UnicodeDecodeError:
+                    raise OddsPapiError(
+                        f"OddsPapi devolvió una codificación no válida en {endpoint} "
+                        f"(HTTP {response_status}; Content-Type {content_type})."
+                    ) from None
+                try:
+                    data = json.loads(raw)
+                except json.JSONDecodeError:
+                    # Do not include the URL or response body here: the API key is a query parameter.
+                    raise OddsPapiError(
+                        f"OddsPapi devolvió contenido que no es JSON en {endpoint} "
+                        f"(HTTP {response_status}; Content-Type {content_type}; "
+                        f"{len(raw_bytes)} bytes)."
+                    ) from None
     except HTTPError as exc:
         try:
             body = json.loads(exc.read(1024 * 1024).decode("utf-8-sig"))
