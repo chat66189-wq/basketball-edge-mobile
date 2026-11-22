@@ -12,6 +12,7 @@ import os
 import re
 import threading
 import time
+import unicodedata
 from datetime import datetime, timedelta, timezone
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
@@ -469,25 +470,68 @@ def _normalise_odds_fixture(fixture: dict, odds: dict, market_families: dict[str
     }
 
 
-def games(window_start: datetime, window_end: datetime) -> dict:
+def _competition_key(value: str) -> str:
+    """Canonicalize exact league identity without merging genders or NCAA divisions."""
+    label = unicodedata.normalize("NFKD", str(value or "")).encode("ascii", "ignore").decode("ascii").casefold()
+    compact = re.sub(r"[^a-z0-9]+", "", label)
+    if not compact:
+        return ""
+    if "wnba" in compact:
+        return "wnba"
+    if "euroleague" in compact:
+        return "euroleague" + ("women" if "women" in compact or "female" in compact else "")
+    if "eurocup" in compact:
+        return "eurocup" + ("women" if "women" in compact or "female" in compact else "")
+    if "nba" in compact and not any(token in compact for token in ("nbagleague", "nbawomen")):
+        return "nba"
+    if "ncaa" in compact:
+        gender = "women" if ("women" in compact or "female" in compact or compact.endswith("ncaaW".lower())) else "men" if "men" in compact or "male" in compact else ""
+        if gender:
+            if any(token in compact for token in ("divisioniii", "division3", "diviii", "div3", "ncaa3")):
+                division = "3"
+            elif any(token in compact for token in ("divisionii", "division2", "divii", "div2", "ncaa2")):
+                division = "2"
+            else:
+                # Providers commonly label NCAA Division I simply "NCAA Women".
+                division = "1"
+            return "ncaadivision" + division + gender
+    # Remove display-only suffixes without erasing league identifiers.
+    for suffix in ("boxscores", "boxscore", "basketball", "statistics", "stats"):
+        if compact.endswith(suffix):
+            compact = compact[:-len(suffix)]
+            break
+    if compact.endswith(("womens", "women", "female")):
+        return compact[:-5] + "women" if compact.endswith("womens") else compact[:-5] + "women"
+    return compact
+
+
+def _fixture_competition_key(fixture: dict) -> str:
+    labels = (fixture.get("tournamentName"), fixture.get("tournamentSlug"))
+    return next((_competition_key(label) for label in labels if _competition_key(label)), _competition_key(fixture.get("categoryName")))
+
+
+def games(
+    window_start: datetime,
+    window_end: datetime,
+    preferred_competitions: list[str] | None = None,
+) -> dict:
     if (window_end - window_start) > timedelta(days=7):
         raise OddsPapiError("La ventana máxima de OddsPapi es de 7 días.", 422)
-    # The fixtures endpoint accepts a basketball-only date range shorter than 10 days.
-    fixtures = _get("fixtures", {
-        "sportId": SPORT_ID_BASKETBALL,
-        "from": window_start.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
-        "to": window_end.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
-        "statusId": 0,
-    }, ttl=90)
-    if not isinstance(fixtures, list):
-        raise OddsPapiError("OddsPapi devolvió un calendario con formato inesperado.")
-    now = datetime.now(timezone.utc)
-    upcoming = [
-        x for x in fixtures if isinstance(x, dict)
-        and str(x.get("startTime") or "")
-        and x.get("statusId") == 0
-    ]
-    upcoming.sort(key=lambda x: str(x.get("startTime") or ""))
+
+    preferred_keys = {
+        _competition_key(label)
+        for label in (preferred_competitions or [])
+        if _competition_key(label)
+    }
+    if not preferred_keys:
+        raise OddsPapiError(
+            "No hay competiciones con historial local para comparar. Importá primero datos de NBA, EuroLeague o NCAA femenina.",
+            422,
+        )
+
+    # Select bookmaker slugs before requesting fixtures. OddsPapi can filter
+    # the fixture list by the exact bookmaker set, so we never fetch odds for
+    # unrelated leagues or matches without prices at those operators.
     account = account_status()
     available_bookmakers = account.get("bookmakers_available_in_plan") or []
     selected_bookmakers = _select_bookmakers(available_bookmakers)
@@ -495,17 +539,71 @@ def games(window_start: datetime, window_end: datetime) -> dict:
         raise OddsPapiError(
             "OddsPapi no devolvió casas de apuestas habilitadas para esta suscripción."
         )
-    market_families = _market_metadata()
+
+    fixtures = _get("fixtures", {
+        "sportId": SPORT_ID_BASKETBALL,
+        "from": window_start.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+        "to": window_end.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+        "statusId": 0,
+        "hasOdds": "true",
+        "bookmakers": ",".join(selected_bookmakers),
+        "language": "en",
+    }, ttl=90)
+    if not isinstance(fixtures, list):
+        raise OddsPapiError("OddsPapi devolvió un calendario con formato inesperado.")
+
+    now = datetime.now(timezone.utc)
+    upcoming = [
+        x for x in fixtures if isinstance(x, dict)
+        and str(x.get("startTime") or "")
+        and x.get("statusId") == 0
+    ]
+    upcoming.sort(key=lambda x: str(x.get("startTime") or ""))
+
+    matching = [
+        x for x in upcoming
+        if _fixture_competition_key(x) in preferred_keys
+    ]
+    matching.sort(key=lambda x: str(x.get("startTime") or ""))
+    available_competitions = sorted({
+        str(x.get("tournamentName") or x.get("tournamentSlug") or "").strip()
+        for x in upcoming
+        if str(x.get("tournamentName") or x.get("tournamentSlug") or "").strip()
+    })
+    matching_competitions = sorted({
+        str(x.get("tournamentName") or x.get("tournamentSlug") or "").strip()
+        for x in matching
+        if str(x.get("tournamentName") or x.get("tournamentSlug") or "").strip()
+    })
+
     remaining = int(account.get("requests_remaining") or 0)
-    # Reserve one request for /fixtures and one for /markets. Avoid consuming the
-    # entire free quota on a single scan.
+    # /fixtures and /markets each consume one request. Leave both reserved.
     odds_limit = min(MAX_ODDS_FIXTURES_PER_RUN, max(0, remaining - 2))
-    selected = [x for x in upcoming if x.get("hasOdds")][:odds_limit]
+    selected = matching[:odds_limit]
+
+    # If no fixture belongs to the user's imported competitions, stop here.
+    # In particular, do not request /markets or odds for other tournaments.
+    if not selected:
+        return {
+            "count": len(upcoming),
+            "games": [],
+            "matching_fixture_count": len(matching),
+            "matching_fixtures_with_odds": len(matching),
+            "matching_competitions": matching_competitions,
+            "available_competitions": available_competitions,
+            "odds_fixtures_requested": 0,
+            "odds_fixtures_with_markets": 0,
+            "quota_remaining_before_scan": remaining,
+            "bookmakers_requested": selected_bookmakers,
+            "bookmakers_limit": MAX_BOOKMAKERS_PER_FIXTURE,
+            "scan_cap": MAX_ODDS_FIXTURES_PER_RUN,
+            "markets_catalog_loaded": False,
+        }
+
+    market_families = _market_metadata()
     normalized = []
     for fixture in selected:
-        # Never cache the raw /odds payload: it can contain thousands of
-        # markets per bookmaker. Process one fixture, normalize it, then let
-        # the raw response be released before fetching the next fixture.
+        # Never cache the raw /odds payload: normalize one fixture at a time.
         odds = _get(
             "odds",
             {
@@ -520,13 +618,19 @@ def games(window_start: datetime, window_end: datetime) -> dict:
             normalized.append(_normalise_odds_fixture(fixture, odds, market_families, now))
         del odds
         time.sleep(0.55)
+
     return {
         "count": len(upcoming),
         "games": normalized,
+        "matching_fixture_count": len(matching),
+        "matching_fixtures_with_odds": len(matching),
+        "matching_competitions": matching_competitions,
+        "available_competitions": available_competitions,
         "odds_fixtures_requested": len(selected),
         "odds_fixtures_with_markets": sum(bool(x.get("periods", {}).get("ft")) for x in normalized),
         "quota_remaining_before_scan": remaining,
         "bookmakers_requested": selected_bookmakers,
         "bookmakers_limit": MAX_BOOKMAKERS_PER_FIXTURE,
         "scan_cap": MAX_ODDS_FIXTURES_PER_RUN,
+        "markets_catalog_loaded": True,
     }
