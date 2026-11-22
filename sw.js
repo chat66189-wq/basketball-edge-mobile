@@ -1,5 +1,5 @@
 'use strict';
-const CACHE='basketball-edge-v20-shell-v14-overtime-simulation';
+const CACHE='basketball-edge-v20-shell-v15-overtime-bulk-settlement';
 const FILES=['./','./index.html','./manifest.webmanifest'];
 self.addEventListener('install',event=>{event.waitUntil(caches.open(CACHE).then(cache=>cache.addAll(FILES)));self.skipWaiting();});
 self.addEventListener('activate',event=>{event.waitUntil(caches.keys().then(keys=>Promise.all(keys.filter(key=>key!==CACHE).map(key=>caches.delete(key)))));self.clients.claim();});
