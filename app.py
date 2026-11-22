@@ -1316,8 +1316,8 @@ async def recommend_parlay(request: Request):
         if not 1000 <= simulations <= 50000:
             raise ValueError("simulations_must_be_between_1000_and_50000")
         minimum_history = int(payload.get("minimum_history_games", 8))
-        if not 3 <= minimum_history <= 30:
-            raise ValueError("minimum_history_games_must_be_between_3_and_30")
+        if not 8 <= minimum_history <= 30:
+            raise ValueError("minimum_history_games_must_be_between_8_and_30")
         all_games = payload.get("games")
         all_stats = payload.get("team_stats")
         if not isinstance(all_games, list) or not isinstance(all_stats, list):
@@ -1351,7 +1351,7 @@ async def recommend_parlay(request: Request):
             if _normalise_competition(x.get("competition")) in imported_competitions
         ]
         scan_pool = matching_fixtures if matching_fixtures else in_window
-        scan_games = scan_pool[:50]
+        scan_games = scan_pool[:200]
 
         all_candidates = []
         skipped: dict[str, int] = {}
@@ -1381,6 +1381,11 @@ async def recommend_parlay(request: Request):
                     team_name_skip_examples.append(detail)
             except Exception:
                 skipped["analysis_error"] = skipped.get("analysis_error", 0) + 1
+
+        # Hard floor: only model estimates >= 65% can be shown or combined.
+        probability_floor = 0.65
+        candidates_before_probability_filter = len(all_candidates)
+        all_candidates = [x for x in all_candidates if float(x.get("probability", 0.0)) >= probability_floor]
 
         # Best displayed price for each distinct selection; keep the bookmaker alongside it.
         best_by_selection = {}
@@ -1435,13 +1440,14 @@ async def recommend_parlay(request: Request):
         warnings = [
             "EXPLORATORY_NOT_VALIDATED: el modelo no tiene validación walk-forward/holdout aprobada.",
             "El modelo base simula tiempo reglamentario; las cuotas FT de HoopsAPI incluyen prórroga. La comparación de probabilidades no es perfectamente equivalente.",
+            "Filtro estricto: solo se muestran y combinan selecciones con probabilidad estimada por el modelo >= 65%; esto no significa que el 65% esté calibrado o validado.",
             "La probabilidad combinada multiplica las probabilidades de las piernas y supone independencia aproximada entre partidos.",
             "Solo se analizan competiciones y equipos con estadísticas históricas locales suficientes; no se inventan datos faltantes.",
             "El historial usa una ventana móvil de hasta 400 días de la misma competición e incluye temporadas anteriores; los cambios de plantel no están modelados.",
             "Las cuotas se filtran por captura de hasta 60 minutos y pueden cambiar antes de apostar.",
         ]
-        if total_in_window > 50:
-            warnings.append("La ventana contiene más de 50 partidos; se analizaron los primeros 50 por hora de inicio.")
+        if total_in_window > 200:
+            warnings.append("La ventana contiene más de 200 partidos; se analizaron los primeros 200 por hora de inicio.")
         return {
             "status": "EXPLORATORY_NOT_VALIDATED",
             "window": {"start": start_time.isoformat(), "end": end_time.isoformat()},
@@ -1467,6 +1473,8 @@ async def recommend_parlay(request: Request):
             "history_skip_examples": history_skip_examples,
             "team_name_skip_examples": team_name_skip_examples,
             "eligible_market_selections": len(all_candidates),
+            "candidates_before_probability_filter": candidates_before_probability_filter,
+            "minimum_estimated_leg_probability": probability_floor,
             "top_picks": top_picks,
             "best_parlay": best_parlay,
             "warnings": warnings,
