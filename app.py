@@ -4,6 +4,7 @@ import math
 import os
 import re
 import unicodedata
+from difflib import SequenceMatcher
 from itertools import combinations
 import sys
 import zipfile
@@ -411,38 +412,77 @@ _EUROLEAGUE_TEAM_ALIASES = {
 }
 
 
+def _normalise_team_label(value: Any) -> str:
+    """Normalize provider team labels; gender is isolated by competition scope."""
+    label = _normalise_label(value)
+    for suffix in ("womens", "women", "female", "mens", "men", "male"):
+        if label.endswith(suffix) and len(label) > len(suffix) + 2:
+            return label[:-len(suffix)]
+    return label
+
+
 def _fixture_team_lookup_key(value: Any, competition: str, imported_lookup: dict[str, str]) -> str:
-    key = _normalise_label(value)
+    key = _normalise_team_label(value)
+    if key in imported_lookup:
+        return key
     if competition == "euroleague":
         alias_target = _EUROLEAGUE_TEAM_ALIASES.get(key)
         if alias_target and alias_target in imported_lookup:
             return alias_target
+    # Provider labels occasionally differ by a short suffix or abbreviation.
+    # Resolve only a very close, clearly unique match; otherwise abstain.
+    scored = sorted(
+        ((SequenceMatcher(None, key, candidate).ratio(), candidate) for candidate in imported_lookup),
+        reverse=True,
+    )
+    if scored and scored[0][0] >= 0.92:
+        second_score = scored[1][0] if len(scored) > 1 else 0.0
+        if scored[0][0] - second_score >= 0.05:
+            return scored[0][1]
     return key
 
 
 def _normalise_competition(value: Any) -> str:
-    """Normalize common provider naming differences without merging distinct leagues."""
+    """Normalize provider competition labels without merging distinct leagues or genders."""
     label = _normalise_label(value)
     if not label:
         return ""
-    if "women" in label or "womens" in label:
-        gender = "women"
-    else:
-        gender = ""
+
+    # WNBA is intrinsically a women's competition, with or without that suffix.
     if "wnba" in label:
-        return "wnba" + gender
+        return "wnba"
+
+    gender = ""
+    if "women" in label or "female" in label:
+        gender = "women"
+    elif "mens" in label or label.endswith("men") or "male" in label:
+        gender = "men"
+
     if "euroleague" in label:
         return "euroleague" + gender
     if "eurocup" in label:
         return "eurocup" + gender
-    # NBA aliases may include country/provider suffixes, but must not absorb NBA G League.
+
+    # NBA provider labels may include "men", "basketball", or country descriptors.
     if label in {"nba", "nbamen", "nationalbasketballassociation", "nationalbasketballassociationmen"}:
         return "nba"
     if label.startswith("nba") and not label.startswith(("nbagleague", "nbawomen")):
         return "nba"
-    # Strip common descriptors in sequence (e.g. "NBA Men Box Scores").
-    label = re.sub(r"(boxscores?|basketball|statistics|stats)$", "", label)
-    label = re.sub(r"(mens|men|male)$", "", label)
+
+    # Remove display-only suffixes, then the gender marker. Division and league
+    # identifiers remain intact, so NCAA divisions are not silently merged.
+    for _ in range(3):
+        previous = label
+        for suffix in ("boxscores", "boxscore", "basketball", "statistics", "stats"):
+            if label.endswith(suffix):
+                label = label[:-len(suffix)]
+                break
+        if label == previous:
+            break
+    for suffix in ("womens", "women", "female", "mens", "men", "male"):
+        if label.endswith(suffix):
+            label = label[:-len(suffix)]
+            break
     return label + gender
 
 
@@ -475,13 +515,16 @@ def _history_scope_for_fixture(fixture: dict[str, Any], all_games: list[dict], a
             f"imported_competitions={imported_labels[:12]!r}"
         )
 
-    season_rows: dict[str, list[tuple[datetime, dict]]] = {}
+    # Use a rolling 400-day window across seasons of the SAME normalized
+    # competition. This supplies early-season context without mixing leagues.
+    # _build_history still enforces point-in-time availability (+24h).
+    lookback_start = start_time - timedelta(days=400)
+    eligible_rows: list[tuple[datetime, dict]] = []
     parseable_dates = 0
     invalid_dates = 0
     latest_parseable = None
     for row in comp_rows:
-        season = str(row.get("season") or "").strip()
-        if not season:
+        if not str(row.get("season") or "").strip():
             continue
         try:
             played = _historical_datetime(row.get("event_time"), "event_time")
@@ -491,53 +534,63 @@ def _history_scope_for_fixture(fixture: dict[str, Any], all_games: list[dict], a
         except ValueError:
             invalid_dates += 1
             continue
-        if played + timedelta(hours=24) < start_time:
-            season_rows.setdefault(season, []).append((played, row))
-    if not season_rows:
+        if played >= lookback_start and played + timedelta(hours=24) < start_time:
+            eligible_rows.append((played, row))
+
+    if not eligible_rows:
         latest_text = latest_parseable.isoformat() if latest_parseable else "none"
         raise ValueError(
             "no_imported_history_for_competition_before_fixture:"
             f"fixture_competition={competition!r}:normalized={normalized_competition!r}:"
             f"matching_rows={len(comp_rows)}:parseable_dates={parseable_dates}:"
             f"invalid_dates={invalid_dates}:latest_event_time={latest_text}:"
-            f"fixture_start_time={start_time.isoformat()}"
+            f"fixture_start_time={start_time.isoformat()}:lookback_days=400"
         )
-    season, _ = max(
-        season_rows.items(),
-        key=lambda item: (max(x[0] for x in item[1]), len(item[1])),
-    )
-    scope_competition = str(max(season_rows[season], key=lambda x: x[0])[1].get("competition") or competition)
-    scoped_games = [dict(g, competition=scope_competition, season=season)
-                    for g in comp_rows if str(g.get("season") or "").strip() == season]
 
-    event_teams: dict[str, dict[str, str]] = {}
+    eligible_rows.sort(key=lambda item: item[0])
+    scope_competition = str(eligible_rows[-1][1].get("competition") or competition)
+    history_season = "rolling-400d"
+    scoped_games = [
+        dict(row, competition=scope_competition, season=history_season)
+        for _, row in eligible_rows
+    ]
+
+    # Canonicalize team names across seasons after isolating the competition.
     team_lookup: dict[str, str] = {}
     for row in scoped_games:
-        event_id = str(row.get("event_id") or "").strip()
         home_name = str(row.get("home_team") or "").strip()
         away_name = str(row.get("away_team") or "").strip()
-        if not event_id or not home_name or not away_name:
+        home_key = _normalise_team_label(home_name)
+        away_key = _normalise_team_label(away_name)
+        if home_key and home_name:
+            team_lookup.setdefault(home_key, home_name)
+        if away_key and away_name:
+            team_lookup.setdefault(away_key, away_name)
+
+    event_teams: dict[str, dict[str, str]] = {}
+    for row in scoped_games:
+        event_id = str(row.get("event_id") or "").strip()
+        home_key = _normalise_team_label(row.get("home_team"))
+        away_key = _normalise_team_label(row.get("away_team"))
+        if not event_id or not home_key or not away_key or home_key == away_key:
             continue
-        mapping = {_normalise_label(home_name): home_name, _normalise_label(away_name): away_name}
-        event_teams[event_id] = mapping
-        team_lookup.setdefault(_normalise_label(home_name), home_name)
-        team_lookup.setdefault(_normalise_label(away_name), away_name)
+        event_teams[event_id] = {
+            home_key: team_lookup[home_key],
+            away_key: team_lookup[away_key],
+        }
 
     fixture_home_name = str(fixture.get("home") or "").strip()
     fixture_away_name = str(fixture.get("away") or "").strip()
-    home = team_lookup.get(_fixture_team_lookup_key(fixture_home_name, normalized_competition, team_lookup))
-    away = team_lookup.get(_fixture_team_lookup_key(fixture_away_name, normalized_competition, team_lookup))
+    home_key = _fixture_team_lookup_key(fixture_home_name, normalized_competition, team_lookup)
+    away_key = _fixture_team_lookup_key(fixture_away_name, normalized_competition, team_lookup)
+    home = team_lookup.get(home_key)
+    away = team_lookup.get(away_key)
     if not home or not away or home == away:
-        imported_team_names = sorted({
-            str(name).strip()
-            for row in scoped_games
-            for name in (row.get("home_team"), row.get("away_team"))
-            if str(name or "").strip()
-        })
+        imported_team_names = sorted(set(team_lookup.values()))
         raise ValueError(
             "fixture_team_names_do_not_match_imported_history:"
             f"fixture_home={fixture_home_name!r}:fixture_away={fixture_away_name!r}:"
-            f"imported_team_names={imported_team_names[:40]!r}"
+            f"imported_team_names={imported_team_names[:40]!r}:history_window_days=400"
         )
 
     scoped_ids = set(event_teams)
@@ -546,14 +599,14 @@ def _history_scope_for_fixture(fixture: dict[str, Any], all_games: list[dict], a
         event_id = str(row.get("event_id") or "").strip()
         if event_id not in scoped_ids:
             continue
-        canonical = event_teams[event_id].get(_normalise_label(row.get("team")))
+        canonical = event_teams[event_id].get(_normalise_team_label(row.get("team")))
         if canonical:
             scoped_stats.append(dict(row, team=canonical))
 
     as_of = start_time - timedelta(seconds=1)
     history, counters = _build_history(
         {"games": scoped_games, "team_stats": scoped_stats,
-         "competition": scope_competition, "season": season},
+         "competition": scope_competition, "season": history_season},
         as_of,
     )
     available = [r for r in history if _aware_datetime(r.available_at, "available_at") < as_of]
@@ -568,7 +621,7 @@ def _history_scope_for_fixture(fixture: dict[str, Any], all_games: list[dict], a
 
     home_rates = fit_team_rates(history, home, as_of=as_of, priors=priors)
     away_rates = fit_team_rates(history, away, as_of=as_of, priors=priors)
-    return history, counters, scope_competition, season, home, away, priors, home_rates, away_rates
+    return history, counters, scope_competition, history_season, home, away, priors, home_rates, away_rates
 
 
 def _fixture_market_groups(fixture: dict, now: datetime) -> dict:
@@ -858,6 +911,7 @@ async def preview_parlay(request: Request):
             "LOCAL_ONLY_PREVIEW: esta ejecución no consulta HoopsAPI ni obtiene cuotas.",
             "Las probabilidades proceden de simulaciones exploratorias y no están calibradas ni validadas.",
             "Las proyecciones y probabilidades usan el historial local disponible y la muestra indicada por equipo.",
+            "El historial usa una ventana móvil de hasta 400 días de la misma competición e incluye temporadas anteriores; los cambios de plantel no están modelados.",
             "El umbral 100+ equivale a superar 99,5 puntos en tiempo reglamentario; no incluye prórroga.",
             "Esta vista no genera una combinada ni calcula valor esperado: eso requiere cuotas actuales y comparables.",
         ]
@@ -1032,6 +1086,7 @@ async def recommend_parlay(request: Request):
             "El modelo base simula tiempo reglamentario; las cuotas FT de HoopsAPI incluyen prórroga. La comparación de probabilidades no es perfectamente equivalente.",
             "La probabilidad combinada multiplica las probabilidades de las piernas y supone independencia aproximada entre partidos.",
             "Solo se analizan competiciones y equipos con estadísticas históricas locales suficientes; no se inventan datos faltantes.",
+            "El historial usa una ventana móvil de hasta 400 días de la misma competición e incluye temporadas anteriores; los cambios de plantel no están modelados.",
             "Las cuotas se filtran por captura de hasta 60 minutos y pueden cambiar antes de apostar.",
         ]
         if total_in_window > 50:
