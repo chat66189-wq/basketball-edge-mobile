@@ -69,7 +69,7 @@ def status() -> dict:
 
 
 def games() -> dict:
-    data = _get("/v1/games", ttl=120)
+    data = _get("/v1/games", ttl=600)
     items = data.get("games") or []
     if not isinstance(items, list):
         raise HoopsAPIError("La lista de partidos de HoopsAPI es inválida.")
