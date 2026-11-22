@@ -457,7 +457,7 @@ def _fixture_team_lookup_key(value: Any, competition: str, imported_lookup: dict
         )
         ratio = SequenceMatcher(None, key, candidate_key).ratio()
         if shorter.issubset(longer) and (
-            len(shorter) >= 2 or (len(shorter) == 1 and len(next(iter(shorter))) >= 7)
+            len(shorter) >= 2 or (len(shorter) == 1 and len(next(iter(shorter))) >= 6)
         ):
             score = 0.97
         else:
