@@ -45,6 +45,10 @@
         <div class="actions"><button class="action" id="import-csv">Importar CSV</button></div><div id="import-message" class="fileline" aria-live="polite"></div>
       </div>
       <div class="panel"><h2>Qué significan los datos</h2><p class="small">La importación solo guarda filas en este navegador. No confirma que los datos sean correctos, completos, comparables o suficientes para entrenar o validar modelos. Conservá siempre una copia original y verificá las fuentes.</p></div>
+      <div class="panel"><div class="row"><h2>Diagnóstico del historial guardado</h2><button class="action secondary" id="refresh-history-diagnostics" type="button">Actualizar</button></div>
+        <p class="small">Revisa los datos que ya están en este iPhone. No consulta APIs, no modifica registros y no vuelve a importar archivos.</p>
+        <div id="history-diagnostics" class="fileline" aria-live="polite">Calculando cobertura local…</div>
+      </div>
     </section>
 
     <section id="tab-picks" class="hidden">
@@ -159,6 +163,65 @@ function csvEscape(s){const v=String(s??'');return /[",\n\r]/.test(v)?'"'+v.repl
 function parseCSV(text){const rows=[];let row=[],field='',quoted=false;for(let i=0;i<text.length;i++){const c=text[i];if(quoted){if(c==='"'&&text[i+1]==='"'){field+='"';i++;}else if(c==='"')quoted=false;else field+=c;}else if(c==='"')quoted=true;else if(c===','){row.push(field);field='';}else if(c==='\n'){row.push(field);rows.push(row);row=[];field='';}else if(c!=='\r')field+=c;}if(quoted)throw new Error('El CSV tiene comillas sin cerrar.');if(field.length||row.length){row.push(field);rows.push(row);}return rows.filter(r=>r.some(v=>v.trim()!==''));}
 function download(name,content,type){const blob=new Blob([content],{type});const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=name;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1500);}
 async function refresh(){const records=await allRecords();const datasets=Object.fromEntries(Object.keys(HEADERS).map(k=>[k,records.filter(r=>r.kind==='dataset'&&r.type===k).length]));const picks=records.filter(r=>r.kind==='pick');document.getElementById('count-games').textContent=datasets.games;document.getElementById('count-team').textContent=datasets.team_stats;document.getElementById('count-players').textContent=datasets.player_stats;document.getElementById('count-odds').textContent=datasets.odds;document.getElementById('count-fixtures').textContent=datasets.fixtures;document.getElementById('count-picks').textContent=picks.length;document.getElementById('count-pending').textContent=picks.filter(p=>!p.outcome||p.outcome==='pending').length;document.getElementById('count-wins').textContent=picks.filter(p=>p.outcome==='win').length;document.getElementById('count-losses').textContent=picks.filter(p=>p.outcome==='loss').length;document.getElementById('pick-list-count').textContent=picks.length;renderPicks(picks);}
+async function renderHistoryDiagnostics(){
+ const box=document.getElementById('history-diagnostics');
+ if(!box)return;
+ box.textContent='Revisando partidos, box scores, competiciones y temporadas guardadas…';
+ try{
+  const records=await allRecords();
+  const games=records.filter(r=>r.kind==='dataset'&&r.type==='games').map(r=>r.data||{});
+  const stats=records.filter(r=>r.kind==='dataset'&&r.type==='team_stats').map(r=>r.data||{});
+  const norm=v=>String(v??'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/[^a-z0-9]/g,'').replace(/(womens|women|female|mens|men|male)$/,'');
+  const byEvent=new Map();
+  for(const row of stats){
+   const eid=String(row.event_id??'').trim(),team=norm(row.team);
+   if(!eid||!team)continue;
+   if(!byEvent.has(eid))byEvent.set(eid,new Set());
+   byEvent.get(eid).add(team);
+  }
+  const finals=new Set(['final','finished','complete','completed','ended','ft','post','closed']);
+  const groups=new Map();
+  for(const game of games){
+   const comp=String(game.competition||'Sin competición').trim()||'Sin competición';
+   const season=String(game.season||'Sin temporada').trim()||'Sin temporada';
+   const id=comp+'|||'+season;
+   if(!groups.has(id))groups.set(id,{competition:comp,season,games:0,boxscores:0,teams:new Map()});
+   const group=groups.get(id);
+   const status=String(game.status||'').trim().toLowerCase();
+   if(!finals.has(status))continue;
+   group.games++;
+   const eventId=String(game.event_id??'').trim();
+   const pair=byEvent.get(eventId)||new Set();
+   const home=norm(game.home_team),away=norm(game.away_team);
+   if(!eventId||!home||!away||!pair.has(home)||!pair.has(away))continue;
+   group.boxscores++;
+   group.teams.set(home,(group.teams.get(home)||0)+1);
+   group.teams.set(away,(group.teams.get(away)||0)+1);
+  }
+  const rows=[...groups.values()].sort((a,b)=>b.boxscores-a.boxscores||a.competition.localeCompare(b.competition));
+  if(!rows.length){
+   box.innerHTML='<p>No se encontraron partidos históricos.</p><p>Partidos guardados: '+games.length+' · Estadísticas de equipo: '+stats.length+'</p>';
+   return;
+  }
+  const totalTeams=rows.reduce((n,g)=>n+g.teams.size,0);
+  const usefulTeams=rows.reduce((n,g)=>n+[...g.teams.values()].filter(v=>v>=8).length,0);
+  let out='<p><strong>'+games.length+'</strong> partidos guardados · <strong>'+stats.length+'</strong> registros de equipo.</p>'+
+   '<p><strong>'+rows.length+'</strong> combinaciones de competición/temporada · <strong>'+usefulTeams+'</strong> equipos con al menos 8 partidos completos (por grupo; puede repetirse un equipo en temporadas distintas).</p>';
+  out+=rows.map(g=>{
+   const values=[...g.teams.entries()].sort((a,b)=>a[1]-b[1]||a[0].localeCompare(b[0]));
+   const ready=values.filter(x=>x[1]>=8).length;
+   const low=values.filter(x=>x[1]<8);
+   const names=low.slice(0,12).map(([name,count])=>safe(name)+' ('+count+')').join(', ');
+   return '<article class="record"><strong>'+safe(g.competition)+' · '+safe(g.season)+'</strong>'+
+    '<p>'+g.games+' partidos finalizados · '+g.boxscores+' con box score completo de ambos equipos · '+g.teams.size+' equipos · '+ready+' con 8+ partidos.</p>'+
+    (low.length?'<p class="small">Debajo de 8: '+low.length+(names?' · '+names:'')+(low.length>12?'…':'')+'</p>':'<p class="small">Todos los equipos detectados alcanzan 8 partidos completos.</p>')+
+    '</article>';
+  }).join('');
+  box.innerHTML=out;
+ }catch(error){box.textContent='No se pudo calcular el diagnóstico: '+error.message;}
+}
+document.getElementById('refresh-history-diagnostics').addEventListener('click',renderHistoryDiagnostics);
+document.querySelector('nav button[data-tab="datos"]').addEventListener('click',renderHistoryDiagnostics);
 function safe(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 function renderPicks(picks){const box=document.getElementById('pick-list');if(!picks.length){box.className='empty';box.textContent='Todavía no hay picks registrados.';return;}box.className='';box.innerHTML=picks.sort((a,b)=>b.created-a.created).map(p=>`<article class="record"><div class="row"><strong>${safe(p.market)} · ${safe(p.selection)}</strong><span class="pill">${safe(p.outcome||'pending')}</span></div><p>Evento: ${safe(p.event)} · ${safe(p.competition||'Sin competición')}</p><p>Cuota: ${safe(p.odds||'—')} · Probabilidad declarada: ${p.probability===''?'—':safe(p.probability)+'%'}</p><p>Decisión: ${safe(p.decision)}${p.notes?' · '+safe(p.notes):''}</p><div class="actions"><select aria-label="Liquidar pick" data-settle="${safe(p.key)}"><option value="pending" ${(!p.outcome||p.outcome==='pending')?'selected':''}>Pendiente</option><option value="win" ${p.outcome==='win'?'selected':''}>WIN</option><option value="loss" ${p.outcome==='loss'?'selected':''}>LOSS</option><option value="void" ${p.outcome==='void'?'selected':''}>VOID</option></select><button class="action danger" data-delete="${safe(p.key)}" type="button">Eliminar</button></div></article>`).join('');}
 document.querySelectorAll('nav button').forEach(btn=>btn.addEventListener('click',()=>{document.querySelectorAll('nav button').forEach(b=>b.classList.toggle('active',b===btn));document.querySelectorAll('main section').forEach(s=>s.classList.toggle('hidden',s.id!=='tab-'+btn.dataset.tab));}));
