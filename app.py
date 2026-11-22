@@ -1165,7 +1165,7 @@ async def recommend_bookmaker_parlay(request: Request):
 
         best_by_selection = {}
         for candidate in all_candidates:
-            key = (candidate["event_id"], candidate["market"], candidate["side"], candidate["line"])
+            key = (candidate["event_id"], candidate["market"], candidate["side"], candidate["line"], candidate["settlement"])
             previous = best_by_selection.get(key)
             if previous is None or candidate["odds"] > previous["odds"]:
                 best_by_selection[key] = candidate
@@ -1222,7 +1222,7 @@ async def recommend_bookmaker_parlay(request: Request):
         warnings = [
             "EXPLORATORY_NOT_VALIDATED: el modelo no tiene validación walk-forward/holdout aprobada.",
             "Las cuotas se cargaron manualmente; no existe una conexión autenticada ni actualización automática con la casa.",
-            "Solo se evalúan ganador, hándicap, total del partido y totales por equipo; cada cotización requiere regla de liquidación confirmada. OT incluido se simula con prórrogas de cinco minutos hasta desempatar.",
+            "Solo se evalúan ganador, hándicap, total del partido y totales por equipo; cada cotización requiere regla de liquidación confirmada. OT incluido se simula con prórrogas de cinco minutos hasta desempatar; esta extensión usa una aproximación no validada del ritmo y la eficiencia.",
             "No se usan mercados de jugadores, mitades, cuartos, margen, par/impar ni otros mercados no modelados por el motor actual.",
             "La probabilidad estimada se mezcla con la probabilidad de mercado sin margen; sigue siendo exploratoria y no calibrada.",
             "La probabilidad combinada multiplica las probabilidades de las piernas y supone independencia aproximada entre partidos.",
