@@ -1346,7 +1346,7 @@ async def recommend_parlay(request: Request):
             raise ValueError("too_many_local_rows")
 
         provider_name = "HoopsAPI"
-        overtime_rule = "includes_overtime"
+        overtime_rule = "regulation_only"
         if os.environ.get("ODDSPAPI_API_KEY", "").strip():
             from oddspapi_provider import games as fetch_odds_games, OddsPapiError
             feed = fetch_odds_games(start_time, end_time)
@@ -1365,7 +1365,7 @@ async def recommend_parlay(request: Request):
             if start_time <= kickoff <= end_time:
                 in_window.append(fixture)
         in_window.sort(key=lambda x: str(x.get("start_time") or ""))
-        total_in_window = len(in_window)
+        total_in_window = int(feed.get("count") or len(in_window)) if provider_name == "OddsPapi" else len(in_window)
 
         # Prioritize fixtures whose competition is actually represented in the
         # user's imported local history before applying the 50-game processing cap.
@@ -1483,6 +1483,7 @@ async def recommend_parlay(request: Request):
             "target_odds": target_odds,
             "matches_in_window": total_in_window,
             "matches_scanned": len(scan_games),
+            "matches_with_odds_loaded": len(in_window),
             "matches_analysed": analysed,
             "matches_matching_imported_competitions": len(matching_fixtures),
             "local_games_count": len(all_games),
