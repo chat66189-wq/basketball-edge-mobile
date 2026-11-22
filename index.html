@@ -166,12 +166,19 @@ async function refresh(){const records=await allRecords();const datasets=Object.
 async function renderHistoryDiagnostics(){
  const box=document.getElementById('history-diagnostics');
  if(!box)return;
- box.textContent='Revisando partidos, box scores, competiciones y temporadas guardadas…';
+ box.textContent='Revisando el historial dentro de la ventana móvil de 400 días…';
  try{
   const records=await allRecords();
   const games=records.filter(r=>r.kind==='dataset'&&r.type==='games').map(r=>r.data||{});
   const stats=records.filter(r=>r.kind==='dataset'&&r.type==='team_stats').map(r=>r.data||{});
+  const fixtures=records.filter(r=>r.kind==='dataset'&&r.type==='fixtures').map(r=>r.data||{});
   const norm=v=>String(v??'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/[^a-z0-9]/g,'').replace(/(womens|women|female|mens|men|male)$/,'');
+  const fixtureCutoffs=new Map();
+  for(const f of fixtures){
+   const comp=String(f.competition||'').trim(),time=Date.parse(f.start_time||'');
+   if(!comp||!Number.isFinite(time))continue;
+   fixtureCutoffs.set(comp,Math.min(fixtureCutoffs.get(comp)??Infinity,time));
+  }
   const byEvent=new Map();
   for(const row of stats){
    const eid=String(row.event_id??'').trim(),team=norm(row.team);
@@ -183,13 +190,15 @@ async function renderHistoryDiagnostics(){
   const groups=new Map();
   for(const game of games){
    const comp=String(game.competition||'Sin competición').trim()||'Sin competición';
-   const season=String(game.season||'Sin temporada').trim()||'Sin temporada';
-   const id=comp+'|||'+season;
-   if(!groups.has(id))groups.set(id,{competition:comp,season,games:0,boxscores:0,teams:new Map()});
-   const group=groups.get(id);
+   if(!groups.has(comp))groups.set(comp,{competition:comp,games:0,boxscores:0,teams:new Map(),teamLabels:new Map(),seasons:new Set(),cutoff:fixtureCutoffs.get(comp)??Date.now()});
+   const group=groups.get(comp);
+   const played=Date.parse(game.event_time||'');
    const status=String(game.status||'').trim().toLowerCase();
-   if(!finals.has(status))continue;
+   if(!finals.has(status)||!Number.isFinite(played))continue;
+   const cutoff=group.cutoff;
+   if(played<cutoff-400*24*60*60*1000||played+24*60*60*1000>=cutoff)continue;
    group.games++;
+   if(game.season)group.seasons.add(String(game.season));
    const eventId=String(game.event_id??'').trim();
    const pair=byEvent.get(eventId)||new Set();
    const home=norm(game.home_team),away=norm(game.away_team);
@@ -197,23 +206,27 @@ async function renderHistoryDiagnostics(){
    group.boxscores++;
    group.teams.set(home,(group.teams.get(home)||0)+1);
    group.teams.set(away,(group.teams.get(away)||0)+1);
+   group.teamLabels.set(home,String(game.home_team||home));
+   group.teamLabels.set(away,String(game.away_team||away));
   }
-  const rows=[...groups.values()].sort((a,b)=>b.boxscores-a.boxscores||a.competition.localeCompare(b.competition));
+  const rows=[...groups.values()].filter(g=>g.games||g.teams.size).sort((a,b)=>b.boxscores-a.boxscores||a.competition.localeCompare(b.competition));
   if(!rows.length){
-   box.innerHTML='<p>No se encontraron partidos históricos.</p><p>Partidos guardados: '+games.length+' · Estadísticas de equipo: '+stats.length+'</p>';
+   box.innerHTML='<p>No se encontraron partidos históricos finalizados dentro de la ventana de 400 días.</p><p>Partidos guardados: '+games.length+' · Estadísticas de equipo: '+stats.length+' · Calendario guardado: '+fixtures.length+'</p>';
    return;
   }
-  const totalTeams=rows.reduce((n,g)=>n+g.teams.size,0);
   const usefulTeams=rows.reduce((n,g)=>n+[...g.teams.values()].filter(v=>v>=8).length,0);
-  let out='<p><strong>'+games.length+'</strong> partidos guardados · <strong>'+stats.length+'</strong> registros de equipo.</p>'+
-   '<p><strong>'+rows.length+'</strong> combinaciones de competición/temporada · <strong>'+usefulTeams+'</strong> equipos con al menos 8 partidos completos (por grupo; puede repetirse un equipo en temporadas distintas).</p>';
+  let out='<p><strong>'+games.length+'</strong> partidos guardados · <strong>'+stats.length+'</strong> registros de equipo · <strong>'+fixtures.length+'</strong> fixtures guardados.</p>'+
+   '<p>La vista agrupa temporadas anteriores de cada competición y aplica la ventana móvil de 400 días y el corte de 24 horas usado por el motor.</p>'+
+   '<p><strong>'+rows.length+'</strong> competiciones con historial disponible · <strong>'+usefulTeams+'</strong> equipos con al menos 8 partidos completos.</p>';
   out+=rows.map(g=>{
    const values=[...g.teams.entries()].sort((a,b)=>a[1]-b[1]||a[0].localeCompare(b[0]));
    const ready=values.filter(x=>x[1]>=8).length;
    const low=values.filter(x=>x[1]<8);
-   const names=low.slice(0,12).map(([name,count])=>safe(name)+' ('+count+')').join(', ');
-   return '<article class="record"><strong>'+safe(g.competition)+' · '+safe(g.season)+'</strong>'+
-    '<p>'+g.games+' partidos finalizados · '+g.boxscores+' con box score completo de ambos equipos · '+g.teams.size+' equipos · '+ready+' con 8+ partidos.</p>'+
+   const names=low.slice(0,12).map(([key,count])=>safe(g.teamLabels.get(key)||key)+' ('+count+')').join(', ');
+   const seasons=[...g.seasons].sort().join(', ');
+   return '<article class="record"><strong>'+safe(g.competition)+'</strong>'+
+    '<p>Temporadas encontradas: '+safe(seasons||'sin temporada')+'</p>'+
+    '<p>'+g.games+' partidos finalizados en ventana · '+g.boxscores+' con box score completo de ambos equipos · '+g.teams.size+' equipos · '+ready+' con 8+ partidos.</p>'+
     (low.length?'<p class="small">Debajo de 8: '+low.length+(names?' · '+names:'')+(low.length>12?'…':'')+'</p>':'<p class="small">Todos los equipos detectados alcanzan 8 partidos completos.</p>')+
     '</article>';
   }).join('');
@@ -222,6 +235,7 @@ async function renderHistoryDiagnostics(){
 }
 document.getElementById('refresh-history-diagnostics').addEventListener('click',renderHistoryDiagnostics);
 document.querySelector('nav button[data-tab="datos"]').addEventListener('click',renderHistoryDiagnostics);
+
 function safe(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 function renderPicks(picks){const box=document.getElementById('pick-list');if(!picks.length){box.className='empty';box.textContent='Todavía no hay picks registrados.';return;}box.className='';box.innerHTML=picks.sort((a,b)=>b.created-a.created).map(p=>`<article class="record"><div class="row"><strong>${safe(p.market)} · ${safe(p.selection)}</strong><span class="pill">${safe(p.outcome||'pending')}</span></div><p>Evento: ${safe(p.event)} · ${safe(p.competition||'Sin competición')}</p><p>Cuota: ${safe(p.odds||'—')} · Probabilidad declarada: ${p.probability===''?'—':safe(p.probability)+'%'}</p><p>Decisión: ${safe(p.decision)}${p.notes?' · '+safe(p.notes):''}</p><div class="actions"><select aria-label="Liquidar pick" data-settle="${safe(p.key)}"><option value="pending" ${(!p.outcome||p.outcome==='pending')?'selected':''}>Pendiente</option><option value="win" ${p.outcome==='win'?'selected':''}>WIN</option><option value="loss" ${p.outcome==='loss'?'selected':''}>LOSS</option><option value="void" ${p.outcome==='void'?'selected':''}>VOID</option></select><button class="action danger" data-delete="${safe(p.key)}" type="button">Eliminar</button></div></article>`).join('');}
 document.querySelectorAll('nav button').forEach(btn=>btn.addEventListener('click',()=>{document.querySelectorAll('nav button').forEach(b=>b.classList.toggle('active',b===btn));document.querySelectorAll('main section').forEach(s=>s.classList.toggle('hidden',s.id!=='tab-'+btn.dataset.tab));}));
