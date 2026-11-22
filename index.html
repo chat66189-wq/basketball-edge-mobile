@@ -30,7 +30,7 @@
     <section id="tab-inicio">
       <div class="panel"><div class="row"><h2>Resumen local</h2><span class="pill" id="storage-state">Comprobando almacenamiento…</span></div>
         <div class="grid">
-          <div class="metric"><strong id="count-games">0</strong><span>Partidos importados</span></div><div class="metric"><strong id="count-team">0</strong><span>Registros de equipos</span></div><div class="metric"><strong id="count-players">0</strong><span>Registros de jugadores</span></div><div class="metric"><strong id="count-odds">0</strong><span>Cuotas importadas</span></div>
+          <div class="metric"><strong id="count-games">0</strong><span>Partidos importados</span></div><div class="metric"><strong id="count-team">0</strong><span>Registros de equipos</span></div><div class="metric"><strong id="count-players">0</strong><span>Registros de jugadores</span></div><div class="metric"><strong id="count-odds">0</strong><span>Cuotas importadas</span></div><div class="metric"><strong id="count-fixtures">0</strong><span>Próximos partidos</span></div>
         </div>
       </div>
       <div class="panel"><h2>Registro de picks</h2><div class="grid"><div class="metric"><strong id="count-picks">0</strong><span>Picks guardados</span></div><div class="metric"><strong id="count-pending">0</strong><span>Pendientes de liquidar</span></div><div class="metric"><strong id="count-wins">0</strong><span>Ganados</span></div><div class="metric"><strong id="count-losses">0</strong><span>Perdidos</span></div></div></div>
@@ -39,7 +39,7 @@
 
     <section id="tab-datos" class="hidden">
       <div class="panel"><h2>Importar datos CSV</h2><p class="muted">Elegí el tipo de archivo y cargá un CSV con los encabezados exactos de la plantilla.</p>
-        <label for="dataset-type">Tipo de datos</label><select id="dataset-type"><option value="games">Partidos (games)</option><option value="team_stats">Estadísticas de equipos (team_stats)</option><option value="player_stats">Estadísticas de jugadores (player_stats)</option><option value="odds">Cuotas (odds)</option></select>
+        <label for="dataset-type">Tipo de datos</label><select id="dataset-type"><option value="fixtures">Próximos partidos (fixtures)</option><option value="games">Partidos (games)</option><option value="team_stats">Estadísticas de equipos (team_stats)</option><option value="player_stats">Estadísticas de jugadores (player_stats)</option><option value="odds">Cuotas (odds)</option></select>
         <div class="actions"><button class="action secondary" id="download-template">Descargar plantilla CSV</button></div>
         <label for="csv-file">Archivo CSV</label><input id="csv-file" type="file" accept=".csv,text/csv">
         <div class="actions"><button class="action" id="import-csv">Importar CSV</button></div><div id="import-message" class="fileline" aria-live="polite"></div>
@@ -90,12 +90,13 @@
         <label for="sportapi-date">Fecha específica (opcional)</label><input id="sportapi-date" type="date">
         <label for="sportapi-limit">Partidos finalizados</label><select id="sportapi-limit"><option value="20">20</option><option value="40">40</option><option value="100">100</option><option value="150">150</option><option value="200" selected>200</option></select>
         <p class="small">Cada partido puede consumir hasta 2 solicitudes adicionales para estadísticas de equipos y jugadores. Máximo 200 partidos por importación (límite documentado por SportAPI.ai).</p>
-        <div class="actions"><button class="action" id="sportapi-import" type="button">Importar datos de SportAPI.ai</button></div>
-        <div id="sportapi-result" class="small"></div>
+        <div class="actions"><button class="action" id="sportapi-import" type="button">Importar datos de SportAPI.ai</button><button class="action secondary" id="sportapi-fixtures" type="button">Importar calendario de la fecha</button></div>
+        <div id="sportapi-result" class="small"></div><div id="sportapi-fixtures-result" class="small"></div>
+        <p class="small">El calendario usa una sola solicitud de SportAPI.ai. No descarga box scores ni consulta HoopsAPI.</p>
       </div>
 
       <div class="panel"><h2>Combinada automática · todas las ligas de básquet disponibles</h2>
-        <p class="small">Busca partidos con cuotas en más de 100 competiciones, analiza solo equipos con al menos 8 partidos históricos completos importados y compara el modelo con las probabilidades del mercado. La clave de cuotas se guarda en Render, no en este iPhone.</p>
+        <p class="small">Primero podés analizar el calendario con el historial guardado en este iPhone, sin consultar HoopsAPI. Para obtener cuotas y armar una combinada real, se necesita una consulta separada a HoopsAPI.</p>
         <p class="small"><a href="https://hoopsapi.com/sign-up" target="_blank" rel="noopener noreferrer">Crear clave gratuita de HoopsAPI</a> · El plan gratuito publica 10 consultas por día.</p>
         <div id="hoopsapi-status" class="fileline" aria-live="polite">Comprobando configuración de cuotas…</div>
         <div class="grid">
@@ -103,7 +104,7 @@
           <div><label for="parlay-end">Hasta (hora local)</label><input id="parlay-end" type="datetime-local" required></div>
         </div>
         <label for="parlay-target">Cuota total objetivo</label><input id="parlay-target" type="number" min="1.01" max="100" step="0.01" value="4.00" required>
-        <div class="actions"><button class="action secondary" type="button" id="check-hoopsapi">Comprobar configuración</button><button class="action" type="button" id="build-parlay">Buscar mejores picks y armar combinada</button></div>
+        <div class="actions"><button class="action" type="button" id="preview-local">Analizar candidatos localmente (sin cuotas)</button><button class="action secondary" type="button" id="check-hoopsapi">Comprobar configuración</button><button class="action" type="button" id="build-parlay">Consultar HoopsAPI: buscar picks y armar combinada</button></div>
         <div id="parlay-message" class="fileline" aria-live="polite"></div>
         <div id="parlay-result"></div>
       </div>
@@ -142,6 +143,7 @@
 'use strict';
 const DB_NAME='basketball-edge-v20-mobile', DB_VERSION=1, STORE='records';
 const HEADERS={
+ fixtures:['fixture_id','competition','season','start_time','home_team','away_team','status'],
  games:['event_id','competition','season','event_time','home_team','away_team','status','home_score','away_score'],
  team_stats:['event_id','team','possessions','points','fga','fgm','fg3a','fg3m','fta','ftm','oreb','dreb','tov'],
  player_stats:['event_id','player_id','team','minutes','points','rebounds','assists','steals','blocks','turnovers','fga','fgm','fg3a','fg3m','fta','ftm'],
@@ -156,7 +158,7 @@ function clearAll(){return new Promise((resolve,reject)=>{const tx=db.transactio
 function csvEscape(s){const v=String(s??'');return /[",\n\r]/.test(v)?'"'+v.replace(/"/g,'""')+'"':v;}
 function parseCSV(text){const rows=[];let row=[],field='',quoted=false;for(let i=0;i<text.length;i++){const c=text[i];if(quoted){if(c==='"'&&text[i+1]==='"'){field+='"';i++;}else if(c==='"')quoted=false;else field+=c;}else if(c==='"')quoted=true;else if(c===','){row.push(field);field='';}else if(c==='\n'){row.push(field);rows.push(row);row=[];field='';}else if(c!=='\r')field+=c;}if(quoted)throw new Error('El CSV tiene comillas sin cerrar.');if(field.length||row.length){row.push(field);rows.push(row);}return rows.filter(r=>r.some(v=>v.trim()!==''));}
 function download(name,content,type){const blob=new Blob([content],{type});const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=name;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1500);}
-async function refresh(){const records=await allRecords();const datasets=Object.fromEntries(Object.keys(HEADERS).map(k=>[k,records.filter(r=>r.kind==='dataset'&&r.type===k).length]));const picks=records.filter(r=>r.kind==='pick');document.getElementById('count-games').textContent=datasets.games;document.getElementById('count-team').textContent=datasets.team_stats;document.getElementById('count-players').textContent=datasets.player_stats;document.getElementById('count-odds').textContent=datasets.odds;document.getElementById('count-picks').textContent=picks.length;document.getElementById('count-pending').textContent=picks.filter(p=>!p.outcome||p.outcome==='pending').length;document.getElementById('count-wins').textContent=picks.filter(p=>p.outcome==='win').length;document.getElementById('count-losses').textContent=picks.filter(p=>p.outcome==='loss').length;document.getElementById('pick-list-count').textContent=picks.length;renderPicks(picks);}
+async function refresh(){const records=await allRecords();const datasets=Object.fromEntries(Object.keys(HEADERS).map(k=>[k,records.filter(r=>r.kind==='dataset'&&r.type===k).length]));const picks=records.filter(r=>r.kind==='pick');document.getElementById('count-games').textContent=datasets.games;document.getElementById('count-team').textContent=datasets.team_stats;document.getElementById('count-players').textContent=datasets.player_stats;document.getElementById('count-odds').textContent=datasets.odds;document.getElementById('count-fixtures').textContent=datasets.fixtures;document.getElementById('count-picks').textContent=picks.length;document.getElementById('count-pending').textContent=picks.filter(p=>!p.outcome||p.outcome==='pending').length;document.getElementById('count-wins').textContent=picks.filter(p=>p.outcome==='win').length;document.getElementById('count-losses').textContent=picks.filter(p=>p.outcome==='loss').length;document.getElementById('pick-list-count').textContent=picks.length;renderPicks(picks);}
 function safe(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 function renderPicks(picks){const box=document.getElementById('pick-list');if(!picks.length){box.className='empty';box.textContent='Todavía no hay picks registrados.';return;}box.className='';box.innerHTML=picks.sort((a,b)=>b.created-a.created).map(p=>`<article class="record"><div class="row"><strong>${safe(p.market)} · ${safe(p.selection)}</strong><span class="pill">${safe(p.outcome||'pending')}</span></div><p>Evento: ${safe(p.event)} · ${safe(p.competition||'Sin competición')}</p><p>Cuota: ${safe(p.odds||'—')} · Probabilidad declarada: ${p.probability===''?'—':safe(p.probability)+'%'}</p><p>Decisión: ${safe(p.decision)}${p.notes?' · '+safe(p.notes):''}</p><div class="actions"><select aria-label="Liquidar pick" data-settle="${safe(p.key)}"><option value="pending" ${(!p.outcome||p.outcome==='pending')?'selected':''}>Pendiente</option><option value="win" ${p.outcome==='win'?'selected':''}>WIN</option><option value="loss" ${p.outcome==='loss'?'selected':''}>LOSS</option><option value="void" ${p.outcome==='void'?'selected':''}>VOID</option></select><button class="action danger" data-delete="${safe(p.key)}" type="button">Eliminar</button></div></article>`).join('');}
 document.querySelectorAll('nav button').forEach(btn=>btn.addEventListener('click',()=>{document.querySelectorAll('nav button').forEach(b=>b.classList.toggle('active',b===btn));document.querySelectorAll('main section').forEach(s=>s.classList.toggle('hidden',s.id!=='tab-'+btn.dataset.tab));}));
@@ -242,6 +244,25 @@ document.getElementById('sportapi-import').addEventListener('click',async()=>{
 });
 
 
+
+const sportApiFixturesMessage=document.getElementById('sportapi-fixtures-result');
+document.getElementById('sportapi-fixtures').addEventListener('click',async()=>{
+  try{
+    const league=document.getElementById('sportapi-league').value;
+    const date=document.getElementById('sportapi-date').value;
+    if(!league)throw new Error('Primero buscá y elegí una competición.');
+    if(!date)throw new Error('Elegí la fecha del calendario.');
+    sportApiFixturesMessage.textContent='Consultando el calendario (1 solicitud de SportAPI.ai)…';
+    const query=new URLSearchParams({league,date,limit:'80'});
+    const data=await sportApiRequest('/api/sportapi/fixtures?'+query);
+    for(const row of data.fixtures||[]){
+      await putRecord({key:'dataset:fixtures:'+row.fixture_id,kind:'dataset',type:'fixtures',data:row,created:Date.now()});
+    }
+    await refresh();
+    sportApiFixturesMessage.textContent='Calendario guardado localmente: '+data.count+' partidos próximos para '+date+'. Cuota SportAPI: '+JSON.stringify(data.quota||{})+'. No se consultó HoopsAPI.';
+  }catch(error){sportApiFixturesMessage.textContent='No se pudo importar el calendario: '+error.message;}
+});
+
 const hoopsStatus=document.getElementById('hoopsapi-status');
 const parlayMessage=document.getElementById('parlay-message');
 const parlayResult=document.getElementById('parlay-result');
@@ -269,6 +290,56 @@ async function checkHoopsApi(){
 }
 document.getElementById('check-hoopsapi').addEventListener('click',checkHoopsApi);
 checkHoopsApi();
+
+let lastLocalPreview=null;
+function localCandidateHtml(c){
+ const kickoff=new Date(c.start_time).toLocaleString('es-AR',{dateStyle:'short',timeStyle:'short'});
+ return '<article class="record"><strong>'+safe(c.game)+'</strong>'+
+ '<p>'+safe(c.competition)+' · '+safe(c.history_season)+' · '+kickoff+'</p>'+
+ '<p>Proyección: <strong>'+Number(c.projected_home_points).toFixed(1)+' – '+Number(c.projected_away_points).toFixed(1)+'</strong> puntos · Total '+Number(c.projected_total_points).toFixed(1)+'</p>'+
+ '<p>Victoria estimada: '+safe(c.home_team)+' '+pct(c.home_win_probability)+' · '+safe(c.away_team)+' '+pct(c.away_win_probability)+'</p>'+
+ '<p>Probabilidad simulada de 100+ puntos: '+safe(c.home_team)+' '+pct(c.home_100_plus_probability)+' · '+safe(c.away_team)+' '+pct(c.away_100_plus_probability)+'</p>'+
+ '<p class="small">Historial: '+c.home_history_games+'/'+c.away_history_games+' partidos · '+Number(c.simulations).toLocaleString('es-AR')+' simulaciones · '+safe(c.rating_method)+'</p></article>';
+}
+document.getElementById('preview-local').addEventListener('click',async()=>{
+ const button=document.getElementById('preview-local');
+ try{
+  const start=document.getElementById('parlay-start').value,end=document.getElementById('parlay-end').value;
+  if(!start||!end)throw new Error('Indicá el horario desde y hasta.');
+  const base=apiBase();localStorage.setItem('bea-v20-api-url',base);
+  button.disabled=true;button.textContent='Calculando con historial local…';parlayResult.innerHTML='';
+  const records=await allRecords();
+  const games=records.filter(r=>r.kind==='dataset'&&r.type==='games').map(r=>r.data);
+  const teamStats=records.filter(r=>r.kind==='dataset'&&r.type==='team_stats').map(r=>r.data);
+  const fixtures=records.filter(r=>r.kind==='dataset'&&r.type==='fixtures').map(r=>r.data);
+  if(!games.length||!teamStats.length)throw new Error('Primero necesitás historial y estadísticas locales de equipos.');
+  if(!fixtures.length)throw new Error('Primero importá el calendario de SportAPI.ai o un CSV de próximos partidos en Datos CSV.');
+  parlayMessage.textContent='Análisis local: '+fixtures.length+' partidos del calendario, '+games.length+' históricos y '+teamStats.length+' registros de equipo. No se consultará HoopsAPI.';
+  const response=await fetch(base+'/api/parlay/preview',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+   window_start:new Date(start).toISOString(),window_end:new Date(end).toISOString(),
+   simulations:10000,minimum_history_games:8,fixtures,games,team_stats:teamStats
+  })});
+  let data;try{data=await response.json();}catch(_){throw new Error('El servidor devolvió una respuesta no válida.');}
+  if(!response.ok)throw new Error(data.detail||('HTTP '+response.status));
+  lastLocalPreview=data;
+  const skips=data.skipped&&Object.keys(data.skipped).length?'<p class="small">No analizados: '+Object.entries(data.skipped).map(([k,v])=>safe(k)+' ('+v+')').join(' · ')+'</p>':'';
+  const examples=data.skip_examples&&data.skip_examples.length?'<details class="small"><summary>Detalles de partidos omitidos</summary><p>'+data.skip_examples.map(safe).join(' · ')+'</p></details>':'';
+  let body='<div class="panel"><div class="row"><h3>Preanálisis local</h3><span class="pill">'+safe(data.mode)+'</span></div>'+
+   '<p>Calendario en la ventana: '+data.fixtures_in_window+' · Analizados: '+data.fixtures_analysed+'</p>'+
+   '<p>Historial local: '+data.local_games_count+' partidos · '+data.local_team_stats_count+' registros de equipo.</p>'+skips+examples;
+  if(data.candidates&&data.candidates.length){
+   body+='<h3>Proyecciones de partidos</h3>'+data.candidates.map(localCandidateHtml).join('');
+  }else{
+   body+='<p class="notice">No se pudo analizar ningún partido con el historial local disponible. Revisá competición, nombres y mínimo de 8 partidos por equipo.</p>';
+  }
+  body+='<p class="notice">Esto no es una combinada ni picks con valor esperado: todavía no hay cuotas. Las probabilidades son exploratorias y no están validadas.</p>'+
+   '<ul>'+(data.warnings||[]).map(w=>'<li class="small">'+safe(w)+'</li>').join('')+'</ul></div>';
+  parlayResult.innerHTML=body;
+  parlayMessage.textContent='Preanálisis terminado. No se consumió ninguna solicitud de HoopsAPI.';
+ }catch(error){parlayMessage.textContent='No se pudo ejecutar el preanálisis local: '+error.message;}
+ finally{button.disabled=false;button.textContent='Analizar candidatos localmente (sin cuotas)';}
+});
+
 document.getElementById('build-parlay').addEventListener('click',async()=>{
  const button=document.getElementById('build-parlay');
  try{
@@ -282,7 +353,7 @@ document.getElementById('build-parlay').addEventListener('click',async()=>{
   const games=records.filter(r=>r.kind==='dataset'&&r.type==='games').map(r=>r.data);
   const teamStats=records.filter(r=>r.kind==='dataset'&&r.type==='team_stats').map(r=>r.data);
   if(!games.length||!teamStats.length)throw new Error('Primero importá historial y estadísticas de equipos desde SportAPI.ai.');
-  parlayMessage.textContent='Enviando '+games.length+' partidos históricos y '+teamStats.length+' registros de equipo. Consultando cuotas…';
+  parlayMessage.textContent='Esta acción consume una solicitud de HoopsAPI. Enviando '+games.length+' partidos históricos y '+teamStats.length+' registros de equipo…';
   const response=await fetch(base+'/api/parlay/recommend',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
    window_start:new Date(start).toISOString(),window_end:new Date(end).toISOString(),target_odds:target,
    simulations:10000,minimum_history_games:8,games:games,team_stats:teamStats
@@ -319,7 +390,7 @@ document.getElementById('build-parlay').addEventListener('click',async()=>{
   parlayResult.innerHTML=body;
   parlayMessage.textContent='Análisis terminado. Se revisaron hasta '+data.matches_scanned+' partidos de la ventana horaria.';
  }catch(error){parlayMessage.textContent='No se pudo armar la combinada: '+error.message;}
- finally{button.disabled=false;button.textContent='Buscar mejores picks y armar combinada';}
+ finally{button.disabled=false;button.textContent='Consultar HoopsAPI: buscar picks y armar combinada';}
 });
 parlayResult.addEventListener('click',async event=>{
  const saveIndex=event.target.dataset.saveIndex;
