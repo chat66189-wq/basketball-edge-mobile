@@ -421,6 +421,15 @@ def _normalise_team_label(value: Any) -> str:
     return label
 
 
+def _team_match_tokens(value: Any) -> set[str]:
+    """Return meaningful name tokens, with gender suffixes removed."""
+    raw = unicodedata.normalize("NFKD", str(value or "")).encode("ascii", "ignore").decode("ascii").casefold()
+    tokens = re.findall(r"[a-z0-9]+", raw)
+    while tokens and tokens[-1] in {"women", "womens", "female", "men", "mens", "male"}:
+        tokens.pop()
+    return set(tokens)
+
+
 def _fixture_team_lookup_key(value: Any, competition: str, imported_lookup: dict[str, str]) -> str:
     key = _normalise_team_label(value)
     if key in imported_lookup:
@@ -429,18 +438,39 @@ def _fixture_team_lookup_key(value: Any, competition: str, imported_lookup: dict
         alias_target = _EUROLEAGUE_TEAM_ALIASES.get(key)
         if alias_target and alias_target in imported_lookup:
             return alias_target
-    # Provider labels occasionally differ by a short suffix or abbreviation.
-    # Resolve only a very close, clearly unique match; otherwise abstain.
-    scored = sorted(
-        ((SequenceMatcher(None, key, candidate).ratio(), candidate) for candidate in imported_lookup),
-        reverse=True,
-    )
-    if scored and scored[0][0] >= 0.92:
+
+    # Different feeds sometimes use a school's short name in one source and
+    # its nickname in another (e.g. "Kansas City" vs "Kansas City Roos").
+    # Accept token-containment only when the shorter name is distinctive and
+    # the best candidate is clearly unique. Ambiguous city/school labels abstain.
+    target_tokens = _team_match_tokens(value)
+    scored: list[tuple[float, str]] = []
+    for candidate_key, canonical_name in imported_lookup.items():
+        candidate_tokens = _team_match_tokens(canonical_name)
+        if not target_tokens or not candidate_tokens:
+            continue
+        shared = target_tokens & candidate_tokens
+        shorter, longer = (
+            (target_tokens, candidate_tokens)
+            if len(target_tokens) <= len(candidate_tokens)
+            else (candidate_tokens, target_tokens)
+        )
+        ratio = SequenceMatcher(None, key, candidate_key).ratio()
+        if shorter.issubset(longer) and (
+            len(shorter) >= 2 or (len(shorter) == 1 and len(next(iter(shorter))) >= 7)
+        ):
+            score = 0.97
+        else:
+            overlap = len(shared) / max(1, min(len(target_tokens), len(candidate_tokens)))
+            score = 0.55 * ratio + 0.45 * overlap
+        scored.append((score, candidate_key))
+
+    scored.sort(reverse=True)
+    if scored and scored[0][0] >= 0.90:
         second_score = scored[1][0] if len(scored) > 1 else 0.0
-        if scored[0][0] - second_score >= 0.05:
+        if scored[0][0] - second_score >= 0.06:
             return scored[0][1]
     return key
-
 
 def _normalise_competition(value: Any) -> str:
     """Normalize provider competition labels without merging distinct leagues or genders."""
