@@ -379,6 +379,18 @@ def sportapi_sync(league: str, season: str | None = None, date: str | None = Non
         raise HTTPException(status_code=500, detail="sportapi_sync_failed")
 
 
+@app.get("/api/sportapi/fixtures")
+def sportapi_fixtures(league: str, date: str, limit: int = 80):
+    try:
+        from sportapi_provider import fixtures
+        return fixtures(league, date, limit)
+    except Exception as exc:
+        from sportapi_provider import SportAPIError
+        if isinstance(exc, SportAPIError):
+            raise HTTPException(status_code=exc.status, detail=str(exc))
+        raise HTTPException(status_code=500, detail="sportapi_fixtures_failed")
+
+
 
 def _normalise_label(value: Any) -> str:
     raw = unicodedata.normalize("NFKD", str(value or "")).encode("ascii", "ignore").decode("ascii").casefold()
@@ -721,6 +733,157 @@ def _score_fixture(fixture: dict, all_games: list[dict], all_stats: list[dict],
                     "score": edge * 0.6 + min(ev, 0.5) * 0.4,
                 })
     return output, None
+
+
+def _score_fixture_preview(fixture: dict, all_games: list[dict], all_stats: list[dict],
+                           simulations: int, minimum_history: int) -> dict:
+    """Project one scheduled game using local history only; never reads bookmaker odds."""
+    start_time = _aware_datetime(fixture.get("start_time"), "fixture_start_time")
+    history, counters, competition, season, home, away, priors, home_rates, away_rates = _history_scope_for_fixture(
+        fixture, all_games, all_stats, start_time
+    )
+    if home_rates.games < minimum_history or away_rates.games < minimum_history:
+        raise ValueError(f"historial_insuficiente:{home_rates.games}/{away_rates.games}")
+    adjusted = None
+    try:
+        adjusted = fit_opponent_adjusted_ratings(
+            history, as_of=start_time - timedelta(seconds=1),
+            league_ppp=priors.points_per_possession,
+        )
+    except ValueError:
+        adjusted = None
+    projection = project_game(home_rates, away_rates, priors, adjusted_ratings=adjusted)
+    fixture_id = str(fixture.get("game_id") or "")
+    seed = 20261122 + sum(ord(ch) for ch in fixture_id)
+    simulation = simulate_game(projection, simulations=simulations, seed=seed)
+
+    def probability(market: str, side: str, line: float | None = None) -> float:
+        priced = price_game_market(
+            simulation, market, side=side, line=line, overtime_rule="excluded"
+        )
+        return float(priced.p_win)
+
+    return {
+        "fixture_id": fixture_id,
+        "game": f"{home} vs {away}",
+        "competition": competition,
+        "history_season": season,
+        "start_time": fixture.get("start_time"),
+        "home_team": home,
+        "away_team": away,
+        "projected_home_points": projection.home_points_mean,
+        "projected_away_points": projection.away_points_mean,
+        "projected_total_points": projection.home_points_mean + projection.away_points_mean,
+        "home_win_probability": probability("moneyline", "home"),
+        "away_win_probability": probability("moneyline", "away"),
+        "home_100_plus_probability": probability("home_total", "over", 99.5),
+        "away_100_plus_probability": probability("away_total", "over", 99.5),
+        "home_history_games": home_rates.games,
+        "away_history_games": away_rates.games,
+        "historical_games_used": counters.get("games_used", 0),
+        "model_version": projection.model_version,
+        "rating_method": projection.rating_method,
+        "simulations": simulation.simulation_count,
+    }
+
+
+@app.post("/api/parlay/preview")
+async def preview_parlay(request: Request):
+    """Local-only pre-analysis of supplied fixtures. This endpoint must never call HoopsAPI."""
+    try:
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            raise ValueError("request_body_must_be_object")
+        start_time = _aware_datetime(payload.get("window_start"), "window_start")
+        end_time = _aware_datetime(payload.get("window_end"), "window_end")
+        if end_time <= start_time:
+            raise ValueError("window_end_must_be_after_window_start")
+        if end_time - start_time > timedelta(days=7):
+            raise ValueError("maximum_window_is_7_days")
+        simulations = int(payload.get("simulations", 10000))
+        if not 1000 <= simulations <= 50000:
+            raise ValueError("simulations_must_be_between_1000_and_50000")
+        minimum_history = int(payload.get("minimum_history_games", 8))
+        if not 3 <= minimum_history <= 30:
+            raise ValueError("minimum_history_games_must_be_between_3_and_30")
+        all_games = payload.get("games")
+        all_stats = payload.get("team_stats")
+        fixtures = payload.get("fixtures")
+        if not isinstance(all_games, list) or not isinstance(all_stats, list):
+            raise ValueError("local_games_and_team_stats_must_be_arrays")
+        if not isinstance(fixtures, list) or not fixtures:
+            raise ValueError("import_upcoming_fixtures_from_sportapi_or_csv_first")
+        if len(all_games) > 20000 or len(all_stats) > 40000 or len(fixtures) > 100:
+            raise ValueError("too_many_local_rows_or_fixtures")
+
+        in_window = []
+        for item in fixtures:
+            if not isinstance(item, dict):
+                continue
+            start_value = item.get("start_time") or item.get("event_time")
+            try:
+                kickoff = _aware_datetime(start_value, "fixture_start_time")
+            except ValueError:
+                continue
+            if start_time <= kickoff <= end_time:
+                in_window.append({
+                    "game_id": str(item.get("fixture_id") or item.get("event_id") or ""),
+                    "competition": str(item.get("competition") or "").strip(),
+                    "start_time": start_value,
+                    "home": str(item.get("home_team") or item.get("home") or "").strip(),
+                    "away": str(item.get("away_team") or item.get("away") or "").strip(),
+                })
+        in_window.sort(key=lambda item: str(item.get("start_time") or ""))
+        candidates = []
+        skipped: dict[str, int] = {}
+        examples: list[str] = []
+        for fixture in in_window:
+            if not fixture["competition"] or not fixture["home"] or not fixture["away"]:
+                skipped["fixture_fields_missing"] = skipped.get("fixture_fields_missing", 0) + 1
+                continue
+            try:
+                candidates.append(_score_fixture_preview(
+                    fixture, all_games, all_stats, simulations, minimum_history
+                ))
+            except ValueError as exc:
+                detail = str(exc)
+                key = detail.split(":")[0]
+                skipped[key] = skipped.get(key, 0) + 1
+                if len(examples) < 8:
+                    examples.append(detail)
+            except Exception:
+                skipped["analysis_error"] = skipped.get("analysis_error", 0) + 1
+
+        warnings = [
+            "LOCAL_ONLY_PREVIEW: esta ejecución no consulta HoopsAPI ni obtiene cuotas.",
+            "Las probabilidades proceden de simulaciones exploratorias y no están calibradas ni validadas.",
+            "Las proyecciones y probabilidades usan el historial local disponible y la muestra indicada por equipo.",
+            "El umbral 100+ equivale a superar 99,5 puntos en tiempo reglamentario; no incluye prórroga.",
+            "Esta vista no genera una combinada ni calcula valor esperado: eso requiere cuotas actuales y comparables.",
+        ]
+        return {
+            "status": "EXPLORATORY_NOT_VALIDATED",
+            "mode": "LOCAL_ONLY_NO_ODDS",
+            "window": {"start": start_time.isoformat(), "end": end_time.isoformat()},
+            "fixtures_in_window": len(in_window),
+            "fixtures_analysed": len(candidates),
+            "local_games_count": len(all_games),
+            "local_team_stats_count": len(all_stats),
+            "imported_competitions": sorted({
+                str(g.get("competition") or "").strip()
+                for g in all_games if isinstance(g, dict) and str(g.get("competition") or "").strip()
+            }),
+            "skipped": skipped,
+            "skip_examples": examples,
+            "candidates": candidates[:30],
+            "odds_provider_called": False,
+            "best_parlay": None,
+            "warnings": warnings,
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"local_preview_failed:{type(exc).__name__}") from exc
 
 
 @app.get("/api/hoopsapi/status")
