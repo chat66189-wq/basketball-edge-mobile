@@ -522,6 +522,20 @@ def _normalise_competition(value: Any) -> str:
     if "eurocup" in label:
         return "eurocup" + gender
 
+    # Normalize NCAA Division I women's labels used by different fixture feeds.
+    # Never merge NCAA Division II/III or men's competitions into this history.
+    if "ncaa" in label:
+        ncaa_gender = "women" if ("women" in label or "female" in label) else "men" if ("men" in label or "male" in label) else ""
+        if ncaa_gender:
+            if any(token in label for token in ("divisioniii", "division3", "diviii", "div3", "ncaa3")):
+                division = "3"
+            elif any(token in label for token in ("divisionii", "division2", "divii", "div2", "ncaa2")):
+                division = "2"
+            else:
+                # "NCAA Women" is the provider's short label for Division I.
+                division = "1"
+            return "ncaadivision" + division + ncaa_gender
+
     # NBA provider labels may include "men", "basketball", or country descriptors.
     if label in {"nba", "nbamen", "nationalbasketballassociation", "nationalbasketballassociationmen"}:
         return "nba"
@@ -1346,14 +1360,25 @@ async def recommend_parlay(request: Request):
         if len(all_games) > 20000 or len(all_stats) > 40000:
             raise ValueError("too_many_local_rows")
 
+        imported_competition_labels = sorted({
+            str(g.get("competition") or "").strip()
+            for g in all_games
+            if isinstance(g, dict) and str(g.get("competition") or "").strip()
+        })
+        imported_competitions = {
+            _normalise_competition(label) for label in imported_competition_labels
+        }
+
         provider_name = "HoopsAPI"
         overtime_rule = "regulation_only"
         if os.environ.get("ODDSPAPI_API_KEY", "").strip():
             from oddspapi_provider import games as fetch_odds_games, OddsPapiError
-            # OddsPapi performs blocking network I/O and short pauses between
-            # fixture requests. Keep that work off FastAPI's event loop so
-            # health checks and other requests remain responsive.
-            feed = await run_in_threadpool(fetch_odds_games, start_time, end_time)
+            # Filter the fixture feed by the competitions represented in the
+            # iPhone's imported history BEFORE requesting bookmaker odds.
+            # This prevents spending quota on leagues the local model cannot score.
+            feed = await run_in_threadpool(
+                fetch_odds_games, start_time, end_time, imported_competition_labels
+            )
             provider_name = "OddsPapi"
             overtime_rule = "includes_overtime"
         else:
@@ -1371,19 +1396,13 @@ async def recommend_parlay(request: Request):
         in_window.sort(key=lambda x: str(x.get("start_time") or ""))
         total_in_window = int(feed.get("count") or len(in_window)) if provider_name == "OddsPapi" else len(in_window)
 
-        # Prioritize fixtures whose competition is actually represented in the
-        # user's imported local history before applying the 50-game processing cap.
-        imported_competitions = {
-            _normalise_competition(g.get("competition"))
-            for g in all_games
-            if isinstance(g, dict) and str(g.get("competition") or "").strip()
-        }
+        # Never fall back to unrelated competitions: every scored fixture
+        # must have a matching local competition history.
         matching_fixtures = [
             x for x in in_window
             if _normalise_competition(x.get("competition")) in imported_competitions
         ]
-        scan_pool = matching_fixtures if matching_fixtures else in_window
-        scan_games = scan_pool[:200]
+        scan_games = matching_fixtures[:200]
 
         all_candidates = []
         skipped: dict[str, int] = {}
@@ -1481,8 +1500,23 @@ async def recommend_parlay(request: Request):
             "El historial usa una ventana móvil de hasta 400 días de la misma competición e incluye temporadas anteriores; los cambios de plantel no están modelados.",
             "Las cuotas se filtran por captura de hasta 60 minutos y pueden cambiar antes de apostar.",
         ]
+        if provider_name == "OddsPapi" and int(feed.get("matching_fixture_count") or 0) == 0:
+            warnings.append(
+                "OddsPapi no encontró partidos con cuotas en las competiciones que tienen historial local: "
+                + ", ".join(imported_competition_labels)
+                + ". No se consultaron cuotas de ligas ajenas al historial."
+            )
+        elif provider_name == "OddsPapi" and int(feed.get("odds_fixtures_requested") or 0) == 0:
+            warnings.append(
+                "Se encontraron competiciones compatibles, pero no hubo solicitudes de cuotas disponibles en la cuota restante de OddsPapi."
+            )
+        elif provider_name == "OddsPapi" and int(feed.get("matching_fixture_count") or 0) > int(feed.get("odds_fixtures_requested") or 0):
+            warnings.append(
+                f"Hay {int(feed.get('matching_fixture_count') or 0)} partidos compatibles con historial y cuotas; "
+                f"se consultaron {int(feed.get('odds_fixtures_requested') or 0)} por el límite de cuota de esta búsqueda."
+            )
         if total_in_window > 200:
-            warnings.append("La ventana contiene más de 200 partidos; se analizaron los primeros 200 por hora de inicio.")
+            warnings.append("La ventana contiene más de 200 partidos; se procesan primero los partidos con historial compatible.")
         return {
             "status": "EXPLORATORY_NOT_VALIDATED",
             "window": {"start": start_time.isoformat(), "end": end_time.isoformat()},
@@ -1491,7 +1525,10 @@ async def recommend_parlay(request: Request):
             "matches_scanned": len(scan_games),
             "matches_with_odds_loaded": len(in_window),
             "matches_analysed": analysed,
-            "matches_matching_imported_competitions": len(matching_fixtures),
+            "matches_matching_imported_competitions": (
+                int(feed.get("matching_fixture_count") or 0)
+                if provider_name == "OddsPapi" else len(matching_fixtures)
+            ),
             "local_games_count": len(all_games),
             "local_team_stats_count": len(all_stats),
             "imported_competitions": sorted({
@@ -1501,10 +1538,13 @@ async def recommend_parlay(request: Request):
             "fixture_competitions_scanned": sorted({
                 str(x.get("competition") or "").strip() for x in scan_games
             }),
-            "fixture_competitions_in_window": sorted({
-                str(x.get("competition") or "").strip() for x in in_window
-                if str(x.get("competition") or "").strip()
-            })[:40],
+            "fixture_competitions_in_window": (
+                feed.get("available_competitions", [])[:40]
+                if provider_name == "OddsPapi" else sorted({
+                    str(x.get("competition") or "").strip() for x in in_window
+                    if str(x.get("competition") or "").strip()
+                })[:40]
+            ),
             "skipped": skipped,
             "history_skip_examples": history_skip_examples,
             "team_name_skip_examples": team_name_skip_examples,
@@ -1520,6 +1560,8 @@ async def recommend_parlay(request: Request):
             "quota_remaining_before_scan": feed.get("quota_remaining_before_scan") if provider_name == "OddsPapi" else None,
             "bookmakers_requested": feed.get("bookmakers_requested") if provider_name == "OddsPapi" else None,
             "odds_scan_cap": feed.get("scan_cap") if provider_name == "OddsPapi" else None,
+            "odds_competitions_matched": feed.get("matching_competitions") if provider_name == "OddsPapi" else None,
+            "odds_markets_catalog_loaded": feed.get("markets_catalog_loaded") if provider_name == "OddsPapi" else None,
         }
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
