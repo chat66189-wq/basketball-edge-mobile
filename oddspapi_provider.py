@@ -40,18 +40,39 @@ def _get(path: str, params: dict | None = None, ttl: int = 0, unmetered: bool = 
         cached = _CACHE.get(url)
         if ttl and cached and cached[0] > time.time():
             return cached[1]
+    endpoint = "/" + path.lstrip("/")
     try:
         request = Request(url, headers={"Accept": "application/json"}, method="GET")
         with urlopen(request, timeout=45) as response:
-            raw = response.read(20 * 1024 * 1024).decode("utf-8")
+            response_status = getattr(response, "status", 200)
+            content_type = response.headers.get("Content-Type", "no informado")
+            raw_bytes = response.read(20 * 1024 * 1024)
+        try:
+            raw = raw_bytes.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            raise OddsPapiError(
+                f"OddsPapi devolvió una codificación no válida en {endpoint} "
+                f"(HTTP {response_status}; Content-Type {content_type})."
+            ) from None
+        try:
             data = json.loads(raw)
+        except json.JSONDecodeError:
+            # Do not include the URL or response body here: the API key is a query parameter.
+            raise OddsPapiError(
+                f"OddsPapi devolvió contenido que no es JSON en {endpoint} "
+                f"(HTTP {response_status}; Content-Type {content_type}; "
+                f"{len(raw_bytes)} bytes)."
+            ) from None
     except HTTPError as exc:
         try:
-            body = json.loads(exc.read(1024 * 1024).decode("utf-8"))
+            body = json.loads(exc.read(1024 * 1024).decode("utf-8-sig"))
         except Exception:
             body = {}
-        error = body.get("error") if isinstance(body, dict) else {}
-        code = str((error or {}).get("code") or body.get("code") or "")
+        body_obj = body if isinstance(body, dict) else {}
+        error_obj = body_obj.get("error")
+        error_obj = error_obj if isinstance(error_obj, dict) else {}
+        code = str(error_obj.get("code") or body_obj.get("code") or "")
+        provider_message = str(error_obj.get("message") or "")
         if exc.code in (401, 403):
             raise OddsPapiError("OddsPapi rechazó la API Key. Revisá ODDSPAPI_API_KEY en Render.", 502) from exc
         if exc.code == 429 and code == "REQUEST_LIMIT_EXCEEDED":
@@ -60,11 +81,12 @@ def _get(path: str, params: dict | None = None, ttl: int = 0, unmetered: bool = 
             raise OddsPapiError("OddsPapi aplicó un límite temporal de solicitudes. Esperá y volvé a intentar.", 429) from exc
         if exc.code == 404:
             raise OddsPapiError("OddsPapi no encontró datos para la consulta solicitada.", 404) from exc
-        raise OddsPapiError("OddsPapi respondió HTTP " + str(exc.code) + ".", 502) from exc
+        safe_message = f" {provider_message}" if provider_message else ""
+        raise OddsPapiError(
+            f"OddsPapi respondió HTTP {exc.code} en {endpoint}.{safe_message}", 502
+        ) from exc
     except (URLError, TimeoutError):
-        raise OddsPapiError("No se pudo conectar con OddsPapi.") from None
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        raise OddsPapiError("OddsPapi devolvió una respuesta JSON inválida.") from None
+        raise OddsPapiError(f"No se pudo conectar con OddsPapi en {endpoint}.") from None
     if ttl:
         with _LOCK:
             _CACHE[url] = (time.time() + ttl, data)
