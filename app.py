@@ -16,6 +16,7 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.concurrency import run_in_threadpool
 
 BASE_DIR = Path(__file__).resolve().parent
 ENGINE_BUNDLE = BASE_DIR / "engine_bundle.zip"
@@ -1349,12 +1350,15 @@ async def recommend_parlay(request: Request):
         overtime_rule = "regulation_only"
         if os.environ.get("ODDSPAPI_API_KEY", "").strip():
             from oddspapi_provider import games as fetch_odds_games, OddsPapiError
-            feed = fetch_odds_games(start_time, end_time)
+            # OddsPapi performs blocking network I/O and short pauses between
+            # fixture requests. Keep that work off FastAPI's event loop so
+            # health checks and other requests remain responsive.
+            feed = await run_in_threadpool(fetch_odds_games, start_time, end_time)
             provider_name = "OddsPapi"
             overtime_rule = "includes_overtime"
         else:
             from hoopsapi_provider import games as fetch_odds_games
-            feed = fetch_odds_games()
+            feed = await run_in_threadpool(fetch_odds_games)
         now = datetime.now(timezone.utc)
         in_window = []
         for fixture in feed.get("games") or []:
@@ -1391,7 +1395,9 @@ async def recommend_parlay(request: Request):
                 skipped["fixture_fields_missing"] = skipped.get("fixture_fields_missing", 0) + 1
                 continue
             try:
-                candidates, reason = _score_fixture(
+                # Simulations are CPU-heavy; run them outside the event loop.
+                candidates, reason = await run_in_threadpool(
+                    _score_fixture,
                     fixture, all_games, all_stats, simulations, minimum_history, now,
                     overtime_rule=overtime_rule,
                 )
