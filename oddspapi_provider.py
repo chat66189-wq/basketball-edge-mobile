@@ -47,9 +47,13 @@ def _read_basketball_market_array(response, max_bytes: int = 128 * 1024 * 1024) 
     allow_empty_end = True
     closed = False
     selected: list[dict] = []
+    basketball_rows = 0
+    main_family_rows = 0
+    period_counts: dict[str, int] = {}
 
     def consume(final: bool = False) -> None:
         nonlocal buffer, pos, started, expect_value, allow_empty_end, closed
+        nonlocal basketball_rows, main_family_rows
         while True:
             while pos < len(buffer) and buffer[pos].isspace():
                 pos += 1
@@ -82,12 +86,18 @@ def _read_basketball_market_array(response, max_bytes: int = 128 * 1024 * 1024) 
                 if not isinstance(item, dict):
                     raise OddsPapiError("OddsPapi devolvió un elemento inesperado en /markets.")
                 if str(item.get("sportId") or "") == str(SPORT_ID_BASKETBALL):
+                    basketball_rows += 1
                     market_name = str(item.get("marketName") or "")
-                    period = str(item.get("period") or "").lower()
+                    period = str(item.get("period") or "")
+                    period_key = period.strip().lower() or "(vacío)"
+                    period_counts[period_key] = period_counts.get(period_key, 0) + 1
                     family = _market_family(market_name)
-                    if family and period in {"fulltime", "full_time", "match", ""}:
-                        # Keep only the small subset consumed by the model rather
-                        # than retaining every basketball period/market row.
+                    if family:
+                        main_family_rows += 1
+                    # OddsPapi's period labels are not consistent across all
+                    # basketball market rows. Trust the full-game market name,
+                    # but reject any period explicitly marked as a half/quarter.
+                    if family and _is_full_game_period(period):
                         selected.append({
                             "sportId": SPORT_ID_BASKETBALL,
                             "marketId": item.get("marketId"),
@@ -134,7 +144,14 @@ def _read_basketball_market_array(response, max_bytes: int = 128 * 1024 * 1024) 
     if not started or not closed:
         raise OddsPapiError("OddsPapi cerró la respuesta /markets antes de completar el array JSON.")
     if not selected:
-        raise OddsPapiError("El catálogo /markets no contiene mercados principales de partido completo para básquet.")
+        sample_periods = ", ".join(
+            f"{name}:{count}" for name, count in sorted(period_counts.items(), key=lambda x: -x[1])[:8]
+        ) or "ninguno"
+        raise OddsPapiError(
+            "No se pudieron identificar mercados principales de básquet en /markets "
+            f"(filas sportId=11: {basketball_rows}; nombres principales reconocidos: "
+            f"{main_family_rows}; períodos observados: {sample_periods})."
+        )
     return selected
 
 
@@ -258,13 +275,40 @@ def _parse_label(raw: str) -> tuple[str, float | None] | None:
     return None
 
 
+def _is_full_game_period(value: str) -> bool:
+    period = re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
+    if not period:
+        return True
+    # Explicitly reject quarter/half markets, including common short labels.
+    if any(token in period for token in ("half", "quarter", "1h", "2h", "1q", "2q", "3q", "4q")):
+        return False
+    if period in {"h1", "h2", "q1", "q2", "q3", "q4", "1st", "2nd", "3rd", "4th"}:
+        return False
+    # Accept documented labels plus provider-specific full-game aliases. The
+    # market family name is independently checked before this helper is used.
+    return True
+
+
 def _market_family(name: str) -> str | None:
     label = re.sub(r"[^a-z0-9]+", " ", str(name or "").lower()).strip()
-    if "winner" in label and ("overtime" in label or "incl ot" in label):
+    # Names for half/quarter markets sometimes also say "incl. overtime";
+    # never mistake those for full-game match markets.
+    period_markers = (
+        "first half", "second half", "first quarter", "second quarter",
+        "third quarter", "fourth quarter", "1st half", "2nd half",
+        "1st quarter", "2nd quarter", "3rd quarter", "4th quarter",
+        "first period", "second period", "quarter", "half",
+    )
+    if any(marker in label for marker in period_markers):
+        return None
+    includes_overtime = any(token in label for token in (
+        "overtime", "incl ot", "extra time", "extra period",
+    ))
+    if "winner" in label and includes_overtime:
         return "moneyline"
-    if "over under" in label and ("overtime" in label or "incl ot" in label):
+    if "over under" in label and includes_overtime:
         return "total"
-    if "handicap" in label and ("overtime" in label or "incl ot" in label):
+    if "handicap" in label and includes_overtime:
         return "spread"
     return None
 
@@ -278,7 +322,7 @@ def _market_metadata() -> dict[str, str]:
         for row in data if isinstance(row, dict)
         if int(row.get("sportId") or 0) == SPORT_ID_BASKETBALL
         and (family := _market_family(row.get("marketName"))) is not None
-        and str(row.get("period") or "").lower() in {"fulltime", "full_time", "match", ""}
+        and _is_full_game_period(str(row.get("period") or ""))
     }
 
 
