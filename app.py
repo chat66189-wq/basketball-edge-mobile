@@ -707,28 +707,39 @@ def _fixture_market_groups(fixture: dict, now: datetime) -> dict:
         if age < -300 or age > 3600:
             continue
         for model_market, api_market, sides, has_line in specs:
-            item = markets.get(api_market)
-            if not isinstance(item, dict):
-                continue
-            line = None
-            if has_line:
+            raw_items = markets.get(api_market)
+            items = raw_items if isinstance(raw_items, list) else ([raw_items] if isinstance(raw_items, dict) else [])
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                item_captured = item.get("captured_at") or captured
+                if not item_captured:
+                    continue
                 try:
-                    line = _number(item.get("line"), "market_line", -10000)
+                    item_age = (now - _aware_datetime(item_captured, "captured_at")).total_seconds()
                 except ValueError:
                     continue
-            price_a = _positive_price(item.get(sides[0]))
-            price_b = _positive_price(item.get(sides[1]))
-            if not price_a or not price_b:
-                continue
-            key = (model_market, None if line is None else round(line, 2))
-            groups.setdefault(key, []).append({
-                "bookmaker": str(bookmaker),
-                "captured_at": str(captured),
-                "price_a": price_a,
-                "price_b": price_b,
-                "side_a": sides[0],
-                "side_b": sides[1],
-            })
+                if item_age < -300 or item_age > 3600:
+                    continue
+                line = None
+                if has_line:
+                    try:
+                        line = _number(item.get("line"), "market_line", -10000)
+                    except ValueError:
+                        continue
+                price_a = _positive_price(item.get(sides[0]))
+                price_b = _positive_price(item.get(sides[1]))
+                if not price_a or not price_b:
+                    continue
+                key = (model_market, None if line is None else round(line, 2))
+                groups.setdefault(key, []).append({
+                    "bookmaker": str(bookmaker),
+                    "captured_at": str(item_captured),
+                    "price_a": price_a,
+                    "price_b": price_b,
+                    "side_a": sides[0],
+                    "side_b": sides[1],
+                })
     return groups
 
 
@@ -1297,6 +1308,15 @@ def hoopsapi_status():
     return status()
 
 
+@app.get("/api/oddspapi/status")
+def oddspapi_status():
+    from oddspapi_provider import account_status, OddsPapiError
+    try:
+        return account_status()
+    except OddsPapiError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
+
+
 @app.post("/api/parlay/recommend")
 async def recommend_parlay(request: Request):
     try:
@@ -1325,8 +1345,16 @@ async def recommend_parlay(request: Request):
         if len(all_games) > 20000 or len(all_stats) > 40000:
             raise ValueError("too_many_local_rows")
 
-        from hoopsapi_provider import games as fetch_odds_games
-        feed = fetch_odds_games()
+        provider_name = "HoopsAPI"
+        overtime_rule = "includes_overtime"
+        if os.environ.get("ODDSPAPI_API_KEY", "").strip():
+            from oddspapi_provider import games as fetch_odds_games, OddsPapiError
+            feed = fetch_odds_games(start_time, end_time)
+            provider_name = "OddsPapi"
+            overtime_rule = "includes_overtime"
+        else:
+            from hoopsapi_provider import games as fetch_odds_games
+            feed = fetch_odds_games()
         now = datetime.now(timezone.utc)
         in_window = []
         for fixture in feed.get("games") or []:
@@ -1364,7 +1392,8 @@ async def recommend_parlay(request: Request):
                 continue
             try:
                 candidates, reason = _score_fixture(
-                    fixture, all_games, all_stats, simulations, minimum_history, now
+                    fixture, all_games, all_stats, simulations, minimum_history, now,
+                    overtime_rule=overtime_rule,
                 )
                 if reason:
                     skipped[reason.split(":")[0]] = skipped.get(reason.split(":")[0], 0) + 1
@@ -1439,7 +1468,7 @@ async def recommend_parlay(request: Request):
             best_parlay["status"] = "EXPLORATORY_NOT_VALIDATED"
         warnings = [
             "EXPLORATORY_NOT_VALIDATED: el modelo no tiene validación walk-forward/holdout aprobada.",
-            "El modelo base simula tiempo reglamentario; las cuotas FT de HoopsAPI incluyen prórroga. La comparación de probabilidades no es perfectamente equivalente.",
+            ("El modelo simula prórrogas de forma aproximada para mercados que las incluyen; no equivale a una liquidación oficial exacta." if provider_name == "OddsPapi" else "El modelo base simula tiempo reglamentario; las cuotas FT de HoopsAPI incluyen prórroga. La comparación de probabilidades no es perfectamente equivalente."),
             "Filtro estricto: solo se muestran y combinan selecciones con probabilidad estimada por el modelo >= 65%; esto no significa que el 65% esté calibrado o validado.",
             "La probabilidad combinada multiplica las probabilidades de las piernas y supone independencia aproximada entre partidos.",
             "Solo se analizan competiciones y equipos con estadísticas históricas locales suficientes; no se inventan datos faltantes.",
@@ -1478,7 +1507,10 @@ async def recommend_parlay(request: Request):
             "top_picks": top_picks,
             "best_parlay": best_parlay,
             "warnings": warnings,
-            "provider": "HoopsAPI",
+            "provider": provider_name,
+            "odds_fixtures_requested": feed.get("odds_fixtures_requested") if provider_name == "OddsPapi" else None,
+            "odds_fixtures_with_markets": feed.get("odds_fixtures_with_markets") if provider_name == "OddsPapi" else None,
+            "quota_remaining_before_scan": feed.get("quota_remaining_before_scan") if provider_name == "OddsPapi" else None,
         }
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -1486,4 +1518,10 @@ async def recommend_parlay(request: Request):
         from hoopsapi_provider import HoopsAPIError
         if isinstance(exc, HoopsAPIError):
             raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
+        try:
+            from oddspapi_provider import OddsPapiError
+            if isinstance(exc, OddsPapiError):
+                raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
+        except ImportError:
+            pass
         raise HTTPException(status_code=500, detail=f"parlay_analysis_failed:{type(exc).__name__}") from exc
