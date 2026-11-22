@@ -213,23 +213,18 @@ def _normalise_odds_fixture(fixture: dict, odds: dict, market_families: dict[str
             required = ("home", "away") if family in {"moneyline", "spread"} else ("over", "under")
             if not all(side in sides for side in required):
                 continue
-            # Use the oldest timestamp from the two sides to avoid overstating freshness.
             captured = min(sides[x]["captured_at"] for x in required)
             entry = {"line": line, required[0]: sides[required[0]]["price"],
-                     required[1]: sides[required[1]]["price"]}
-            ft.setdefault(bookmaker, {})[api_name] = entry
-            # Store the capture timestamp beside the normalized market for the common parser.
-            ft[bookmaker].setdefault("_captured_at", captured)
-    # Existing parser expects one timestamp per provider board and all market types.
-    # Split market entries by line into its normal shape; line-specific rows are expanded below.
-    periods: dict[str, dict] = {}
-    providers: dict[str, dict] = {}
-    for bookmaker, markets in ft.items():
-        captured = markets.pop("_captured_at", None)
-        if not captured:
-            continue
-        providers[bookmaker] = {"captured_at": captured}
-        periods.setdefault("ft", {})[bookmaker] = markets
+                     required[1]: sides[required[1]]["price"], "captured_at": captured}
+            ft.setdefault(bookmaker, {}).setdefault(api_name, []).append(entry)
+    periods: dict[str, dict] = {"ft": ft}
+    providers: dict[str, dict] = {
+        bookmaker: {"captured_at": max(
+            (entry.get("captured_at") for rows in markets.values() for entry in rows),
+            default=None,
+        )}
+        for bookmaker, markets in ft.items()
+    }
 
     return {
         "game_id": str(fixture.get("fixtureId") or ""),
