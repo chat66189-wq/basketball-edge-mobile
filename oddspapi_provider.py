@@ -681,7 +681,9 @@ def _competition_key(value: str) -> str:
         return "euroleague" + ("women" if "women" in compact or "female" in compact else "")
     if "eurocup" in compact:
         return "eurocup" + ("women" if "women" in compact or "female" in compact else "")
-    if "nba" in compact and not any(token in compact for token in ("nbagleague", "nbawomen")):
+    if "nba" in compact and not any(token in compact for token in (
+        "nbagleague", "nbawomen", "summerleague", "californiaclassic", "preseason",
+    )):
         return "nba"
     if "ncaa" in compact:
         gender = "women" if (
