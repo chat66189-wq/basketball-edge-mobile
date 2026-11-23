@@ -535,7 +535,7 @@ document.getElementById('sportapi-import-all').addEventListener('click',async()=
     quota=catalog.quota||null;
     if(!leagues.length)throw new Error('El proveedor no devolvió ligas con temporada actual.');
     const initialRemaining=sportApiRemaining(quota);
-    const reserve=initialRemaining===null?0:Math.max(80,Math.ceil(initialRemaining*0.08));
+    const reserve=initialRemaining===null?0:Math.max(10,Math.ceil(initialRemaining*0.02));
     let callsAvailable=initialRemaining===null?leagues.length*6:Math.max(0,initialRemaining-reserve);
     for(let i=0;i<leagues.length;i++){
       const league=leagues[i],remainingLeagues=leagues.length-i;
@@ -883,11 +883,11 @@ document.getElementById('run-backtest').addEventListener('click',async()=>{
     const teamStats=records.filter(r=>r.kind==='dataset'&&r.type==='team_stats').map(r=>r.data);
     if(!games.length||!teamStats.length)throw new Error('Primero importá historial y estadísticas de equipos desde SportAPI.ai.');
     out.textContent='Prediciendo partidos ya jugados con datos de antes de cada uno. Puede tardar hasta un minuto…';
-    const response=await fetch(base+'/api/backtest',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({games:games,team_stats:teamStats,simulations:2000,minimum_history_games:12,max_games:250})});
+    const response=await fetch(base+'/api/backtest',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({games:games,team_stats:teamStats,simulations:2000,minimum_history_games:8,max_games:250,only_eligible_leagues:true})});
     let data;try{data=await response.json();}catch(_){throw new Error('El servidor devolvió una respuesta no válida.');}
     if(!response.ok)throw new Error(data.detail||('HTTP '+response.status));
     const sm=data.summary||{};
-    if(!sm.games){out.innerHTML='<p>No hubo partidos evaluables: ningún partido tenía 12 partidos previos por equipo. Importá más historial. '+(Object.entries(data.skipped||{}).map(([k,v])=>safe(k)+' ('+v+')').join(' · '))+'</p>';return;}
+    if(!sm.games){out.innerHTML='<p>No hubo partidos evaluables: ningún partido tenía 8 partidos previos por equipo en ligas con historial suficiente. Importá más historial. '+(Object.entries(data.skipped||{}).map(([k,v])=>safe(k)+' ('+v+')').join(' · '))+'</p>';return;}
     const rows=(sm.by_threshold||[]).map(t=>'<tr><td>≥ '+fmt(t.model_probability_at_least)+'</td><td>'+Number(t.games)+'</td><td>'+fmt(t.mean_predicted_probability)+'</td><td>'+fmt(t.hit_rate)+'</td><td>'+fmt(t.hit_rate_95_lower_bound)+'</td></tr>').join('');
     const comps=Object.entries(data.by_competition||{}).map(([k,v])=>safe(k)+': '+Number(v.games||0)+' partidos, acierto '+fmt(v.favourite_accuracy)).join(' · ');
     out.innerHTML='<p><strong>Resultado del backtest</strong> · '+Number(data.games_evaluated)+' partidos evaluados de '+Number(data.games_considered)+(data.timed_out?' (se cortó por tiempo)':'')+'</p>'+
@@ -895,6 +895,9 @@ document.getElementById('run-backtest').addEventListener('click',async()=>{
      '<table style="width:100%;border-collapse:collapse"><thead><tr><th>Probabilidad del modelo</th><th>Partidos</th><th>Predijo</th><th>Acertó</th><th>Mínimo 95%</th></tr></thead><tbody>'+rows+'</tbody></table>'+
      '<p>Si "Acertó" es menor que "Predijo", el modelo está sobreconfiado en ese tramo: el 70% real es el de la columna "Acertó", no el que muestra la app.</p>'+
      (comps?'<p>Por liga: '+comps+'</p>':'')+
+     '<p class="small">Mínimo de partidos previos por equipo: '+Number((data.settings||{}).minimum_history_games||0)+' (el análisis de picks usa 12; con menos partidos el modelo es menos preciso).</p>'+
+     (Object.keys(data.skipped||{}).length?'<p class="small">No evaluados: '+Object.entries(data.skipped).map(([k,v])=>safe(k==='historial_insuficiente'?'sin historial previo suficiente':k)+' ('+Number(v)+')').join(' · ')+'</p>':'')+
+     ((data.excluded_competitions||[]).length?'<p class="small">Ligas excluidas por falta de historial: '+(data.excluded_competitions||[]).map(safe).join(' / ')+'</p>':'')+
      '<ul>'+(data.notes||[]).map(n=>'<li>'+safe(n)+'</li>').join('')+'</ul>';
   }catch(e){out.textContent='No se pudo medir: '+e.message;}
   finally{button.disabled=false;button.textContent='Medir acierto real del modelo (backtest)';}

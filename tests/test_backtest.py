@@ -76,7 +76,7 @@ class BacktestTests(unittest.TestCase):
 
     def test_first_games_without_history_are_skipped(self):
         games, stats = synthetic_league(games=30)
-        result = app_module._run_backtest(games, stats, 1000, 12, 30, "", 60.0)
+        result = app_module._run_backtest(games, stats, 1000, 12, 30, "", 60.0, False)
         self.assertLess(result["games_evaluated"], 30)
         self.assertGreater(sum(result["skipped"].values()), 0)
 
@@ -93,3 +93,24 @@ class BacktestTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipIf(app_module is None, "fastapi is not installed")
+class BacktestEligibleLeaguesTests(unittest.TestCase):
+    def test_leagues_without_enough_history_are_excluded_and_reported(self):
+        games, stats = synthetic_league(games=200)
+        # A second league with far too little data to ever reach the minimum.
+        tiny_games, tiny_stats = synthetic_league(seed=3, teams=6, games=5)
+        for g in tiny_games:
+            g["competition"] = "Tiny League"
+            g["event_id"] = "tiny-" + g["event_id"]
+        for s in tiny_stats:
+            s["event_id"] = "tiny-" + s["event_id"]
+        result = app_module._run_backtest(
+            games + tiny_games, stats + tiny_stats, 1000, 8, 120, "", 60.0, True)
+        self.assertIn("Tiny League", result["excluded_competitions"])
+        self.assertGreater(result["games_evaluated"], 20)
+
+        unfiltered = app_module._run_backtest(
+            games + tiny_games, stats + tiny_stats, 1000, 8, 120, "", 60.0, False)
+        self.assertEqual(unfiltered["excluded_competitions"], [])
