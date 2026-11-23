@@ -554,9 +554,13 @@ def _normalise_competition(value: Any) -> str:
     if not label:
         return ""
 
-    # WNBA is intrinsically a women's competition, with or without that suffix.
-    if "wnba" in label:
+    # WNBA and common provider display names identify the same women's league.
+    if "wnba" in label or "womensnationalbasketballassociation" in label:
         return "wnba"
+
+    # Keep the Australian NBL distinct from WNBL and other national leagues.
+    if label in {"nbl", "nblmen", "nationalbasketballleague", "nationalbasketballleaguemen", "australianbl", "australiannationalbasketballleague", "nationalbasketballleagueaustralia"}:
+        return "nbl"
 
     gender = "women" if ("women" in label or "female" in label) else ""
 
