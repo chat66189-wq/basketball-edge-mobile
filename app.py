@@ -61,6 +61,17 @@ app.add_middleware(
 TERMINAL_STATUSES = {"final", "finished", "complete", "completed", "ended", "ft", "post", "closed"}
 SUPPORTED_MARKETS = {"moneyline", "spread", "total", "home_total", "away_total"}
 
+# Conservative candidate policy: screening thresholds, not a claim of calibration.
+MIN_ESTIMATED_LEG_PROBABILITY = 0.70
+MIN_RAW_MODEL_PROBABILITY = 0.72
+MIN_MARKET_PROBABILITY = 0.60
+MAX_MODEL_MARKET_GAP = 0.12
+MIN_AUTOMATIC_BOOKMAKER_CONSENSUS = 3
+MAX_MARKET_DISPERSION = 0.04
+MAX_QUOTE_AGE_SECONDS = 15 * 60
+MIN_HISTORICAL_GAMES = 12
+PROBABILITY_UNCERTAINTY_HAIRCUT = 0.02
+
 
 def _simulate_game_for_settlement(projection, *, simulations: int, seed: int,
                                   overtime_rule: str) -> GameSimulation:
@@ -797,7 +808,7 @@ def _fixture_market_groups(fixture: dict, now: datetime) -> dict:
             age = (now - _aware_datetime(captured, "captured_at")).total_seconds()
         except ValueError:
             continue
-        if age < -300 or age > 3600:
+        if age < -300 or age > MAX_QUOTE_AGE_SECONDS:
             continue
         for model_market, api_market, sides, has_line in specs:
             raw_items = markets.get(api_market)
@@ -812,7 +823,7 @@ def _fixture_market_groups(fixture: dict, now: datetime) -> dict:
                     item_age = (now - _aware_datetime(item_captured, "captured_at")).total_seconds()
                 except ValueError:
                     continue
-                if item_age < -300 or item_age > 3600:
+                if item_age < -300 or item_age > MAX_QUOTE_AGE_SECONDS:
                     continue
                 line = None
                 if has_line:
@@ -863,7 +874,8 @@ def _score_fixture(fixture: dict, all_games: list[dict], all_stats: list[dict],
 
     groups = manual_groups if manual_groups is not None else _fixture_market_groups(fixture, now)
     output = []
-    shrink = min(0.65, min(home_rates.games, away_rates.games) / 20.0)
+    # Limit the influence of an unvalidated local model; anchor it to market consensus.
+    shrink = min(0.35, min(home_rates.games, away_rates.games) / 40.0)
     for (market, line), quotes in groups.items():
         fair_samples = []
         for quote in quotes:
@@ -876,8 +888,28 @@ def _score_fixture(fixture: dict, all_games: list[dict], all_stats: list[dict],
                 })
         if not fair_samples:
             continue
+
         sides = ("home", "away") if market in ("moneyline", "spread") else ("over", "under")
-        fair = {side: sum(x[side] for x in fair_samples) / len(fair_samples) for side in sides}
+        bookmaker_count = len({
+            str(q.get("bookmaker") or "").strip() for q in quotes
+            if str(q.get("bookmaker") or "").strip()
+        })
+        if manual_groups is None and bookmaker_count < MIN_AUTOMATIC_BOOKMAKER_CONSENSUS:
+            continue
+
+        fair = {}
+        market_ranges_pp = {}
+        for fair_side in sides:
+            values = sorted(float(sample[fair_side]) for sample in fair_samples)
+            mid = len(values) // 2
+            fair[fair_side] = (
+                values[mid] if len(values) % 2
+                else (values[mid - 1] + values[mid]) / 2.0
+            )
+            market_ranges_pp[fair_side] = (values[-1] - values[0]) * 100.0
+        if manual_groups is None and max(market_ranges_pp.values(), default=0.0) > MAX_MARKET_DISPERSION * 100.0:
+            continue
+
         for side in sides:
             try:
                 priced = price_game_market(
@@ -890,13 +922,23 @@ def _score_fixture(fixture: dict, all_games: list[dict], all_stats: list[dict],
             except (ValueError, TypeError, AttributeError):
                 continue
             no_push_total = raw_win + raw_loss
-            if no_push_total <= 0:
+            if no_push_total <= 0 or push > 0.005:
                 continue
+
             raw_conditional = raw_win / no_push_total
-            # Damp the unvalidated model signal toward the no-vig market consensus.
-            blended = fair[side] + shrink * (raw_conditional - fair[side])
-            if push > 0.005:
+            model_market_gap = abs(raw_conditional - fair[side])
+            if raw_conditional < MIN_RAW_MODEL_PROBABILITY:
                 continue
+            if fair[side] < MIN_MARKET_PROBABILITY:
+                continue
+            if model_market_gap > MAX_MODEL_MARKET_GAP:
+                continue
+
+            blended = fair[side] + shrink * (raw_conditional - fair[side])
+            conservative_probability = max(0.0, blended - PROBABILITY_UNCERTAINTY_HAIRCUT)
+            if conservative_probability < MIN_ESTIMATED_LEG_PROBABILITY:
+                continue
+
             for quote in quotes:
                 if side == quote["side_a"]:
                     price = quote["price_a"]
@@ -904,9 +946,9 @@ def _score_fixture(fixture: dict, all_games: list[dict], all_stats: list[dict],
                     price = quote["price_b"]
                 else:
                     continue
-                ev = blended * price - 1.0
-                edge = blended - fair[side]
-                if edge <= 0.005 or ev <= 0.005:
+                ev = conservative_probability * price - 1.0
+                edge = conservative_probability - fair[side]
+                if edge <= 0.015 or ev <= 0.01:
                     continue
                 label = {
                     "moneyline": "Ganador",
@@ -938,15 +980,24 @@ def _score_fixture(fixture: dict, all_games: list[dict], all_stats: list[dict],
                     "selection": selection,
                     "bookmaker": quote["bookmaker"],
                     "odds": price,
-                    "probability": blended,
+                    "probability": conservative_probability,
                     "raw_model_probability": raw_conditional,
                     "market_probability": fair[side],
+                    "market_consensus_bookmakers": bookmaker_count,
+                    "market_probability_range_pp": market_ranges_pp[side],
+                    "model_market_gap_pp": model_market_gap * 100.0,
+                    "probability_uncertainty_haircut_pp": PROBABILITY_UNCERTAINTY_HAIRCUT * 100.0,
+                    "projected_home_points": projection.home_points_mean,
+                    "projected_away_points": projection.away_points_mean,
+                    "projected_total_points": projection.home_points_mean + projection.away_points_mean,
+                    "projected_pace": projection.pace,
                     "edge_percentage_points": edge * 100.0,
                     "expected_value_per_unit": ev,
                     "push_probability": push,
                     "home_history_games": home_rates.games,
                     "away_history_games": away_rates.games,
                     "historical_games_used": counters.get("games_used", 0),
+                    "simulation_count": simulation.simulation_count,
                     "model_version": projection.model_version,
                     "rating_method": projection.rating_method,
                     "odds_captured_at": quote["captured_at"],
@@ -1021,12 +1072,13 @@ async def preview_parlay(request: Request):
             raise ValueError("window_end_must_be_after_window_start")
         if end_time - start_time > timedelta(days=7):
             raise ValueError("maximum_window_is_7_days")
-        simulations = int(payload.get("simulations", 10000))
+        simulations = int(payload.get("simulations", 25000))
         if not 1000 <= simulations <= 50000:
             raise ValueError("simulations_must_be_between_1000_and_50000")
-        minimum_history = int(payload.get("minimum_history_games", 8))
+        minimum_history = int(payload.get("minimum_history_games", MIN_HISTORICAL_GAMES))
         if not 3 <= minimum_history <= 30:
             raise ValueError("minimum_history_games_must_be_between_3_and_30")
+        minimum_history = max(MIN_HISTORICAL_GAMES, minimum_history)
         all_games = payload.get("games")
         all_stats = payload.get("team_stats")
         fixtures = payload.get("fixtures")
@@ -1128,12 +1180,13 @@ async def recommend_bookmaker_parlay(request: Request):
         target_odds = _number(payload.get("target_odds"), "target_odds", 1.01)
         if target_odds > 100:
             raise ValueError("target_odds_must_not_exceed_100")
-        simulations = int(payload.get("simulations", 10000))
+        simulations = int(payload.get("simulations", 25000))
         if not 1000 <= simulations <= 50000:
             raise ValueError("simulations_must_be_between_1000_and_50000")
-        minimum_history = int(payload.get("minimum_history_games", 8))
+        minimum_history = int(payload.get("minimum_history_games", MIN_HISTORICAL_GAMES))
         if not 8 <= minimum_history <= 30:
             raise ValueError("minimum_history_games_must_be_between_8_and_30")
+        minimum_history = max(MIN_HISTORICAL_GAMES, minimum_history)
 
         all_games = payload.get("games")
         all_stats = payload.get("team_stats")
@@ -1196,7 +1249,7 @@ async def recommend_bookmaker_parlay(request: Request):
                 age = (now - _aware_datetime(captured, "captured_at")).total_seconds()
             except ValueError:
                 continue
-            if age < -300 or age > 3600:
+            if age < -300 or age > MAX_QUOTE_AGE_SECONDS:
                 continue
 
             if market in {"moneyline", "spread"}:
@@ -1323,13 +1376,15 @@ async def recommend_bookmaker_parlay(request: Request):
             best_parlay["status"] = "EXPLORATORY_NOT_VALIDATED"
 
         warnings = [
-            "EXPLORATORY_NOT_VALIDATED: el modelo no tiene validación walk-forward/holdout aprobada.",
+            "EXPLORATORY_NOT_VALIDATED: el modelo no tiene validación walk-forward/holdout aprobada; el 70% no está calibrado ni es una tasa de acierto demostrada.",
             "Las cuotas se cargaron manualmente; no existe una conexión autenticada ni actualización automática con la casa.",
-            "Solo se evalúan ganador, hándicap, total del partido y totales por equipo; cada cotización requiere regla de liquidación confirmada. OT incluido se simula con prórrogas de cinco minutos hasta desempatar; esta extensión usa una aproximación no validada del ritmo y la eficiencia.",
+            "Filtro reforzado: cada pierna debe superar 70% tras un descuento de incertidumbre de 2 puntos; exige simulación bruta >=72%, mercado sin margen >=60%, brecha modelo-mercado <=12 puntos y al menos 12 partidos completos por equipo.",
+            "Las cotizaciones manuales usan una sola casa como referencia; no equivalen a consenso de tres operadores.",
+            "Solo se evalúan ganador, hándicap, total del partido y totales por equipo; cada cotización requiere regla de liquidación confirmada. OT incluido se simula con prórrogas de cinco minutos hasta desempatar; esta extensión usa una aproximación no validada.",
             "No se usan mercados de jugadores, mitades, cuartos, margen, par/impar ni otros mercados no modelados por el motor actual.",
-            "La probabilidad estimada se mezcla con la probabilidad de mercado sin margen; sigue siendo exploratoria y no calibrada.",
+            "El motor no incorpora de forma fiable lesiones, titulares, minutos esperados, descanso ni viajes; se apoya principalmente en puntos y posesiones.",
             "La probabilidad combinada multiplica las probabilidades de las piernas y supone independencia aproximada entre partidos.",
-            "Las cuotas ingresadas pueden cambiar antes de confirmar una apuesta; volvé a comprobarlas en el sitio.",
+            "Las cuotas manuales deben haberse capturado en los últimos 15 minutos y pueden cambiar antes de apostar.",
             "El historial usa una ventana móvil de hasta 400 días de la misma competición; los cambios de plantel no están modelados.",
         ]
         if unconfirmed_settlement_quotes:
@@ -1379,6 +1434,8 @@ async def recommend_bookmaker_parlay(request: Request):
             "unconfirmed_settlement_quotes": unconfirmed_settlement_quotes,
             "unsupported_market_quotes": unsupported_market_quotes,
             "eligible_market_selections": len(all_candidates),
+            "minimum_estimated_leg_probability": MIN_ESTIMATED_LEG_PROBABILITY,
+            "minimum_history_games": minimum_history,
             "top_picks": top_picks,
             "best_parlay": best_parlay,
             "warnings": warnings,
@@ -1424,12 +1481,13 @@ async def recommend_parlay(request: Request):
         target_odds = _number(payload.get("target_odds"), "target_odds", 1.01)
         if target_odds > 100:
             raise ValueError("target_odds_must_not_exceed_100")
-        simulations = int(payload.get("simulations", 10000))
+        simulations = int(payload.get("simulations", 25000))
         if not 1000 <= simulations <= 50000:
             raise ValueError("simulations_must_be_between_1000_and_50000")
-        minimum_history = int(payload.get("minimum_history_games", 8))
+        minimum_history = int(payload.get("minimum_history_games", MIN_HISTORICAL_GAMES))
         if not 8 <= minimum_history <= 30:
             raise ValueError("minimum_history_games_must_be_between_8_and_30")
+        minimum_history = max(MIN_HISTORICAL_GAMES, minimum_history)
         all_games = payload.get("games")
         all_stats = payload.get("team_stats")
         if not isinstance(all_games, list) or not isinstance(all_stats, list):
@@ -1526,8 +1584,8 @@ async def recommend_parlay(request: Request):
             except Exception:
                 skipped["analysis_error"] = skipped.get("analysis_error", 0) + 1
 
-        # Hard floor: only model estimates >= 65% can be shown or combined.
-        probability_floor = 0.65
+        # Final safeguard: every displayed/combined leg must clear the conservative 70% floor.
+        probability_floor = MIN_ESTIMATED_LEG_PROBABILITY
         candidates_before_probability_filter = len(all_candidates)
         all_candidates = [x for x in all_candidates if float(x.get("probability", 0.0)) >= probability_floor]
 
@@ -1582,13 +1640,17 @@ async def recommend_parlay(request: Request):
             best_parlay.pop("rank", None)
             best_parlay["status"] = "EXPLORATORY_NOT_VALIDATED"
         warnings = [
-            "EXPLORATORY_NOT_VALIDATED: el modelo no tiene validación walk-forward/holdout aprobada.",
+            "EXPLORATORY_NOT_VALIDATED: el modelo no tiene validación walk-forward/holdout aprobada; el 70% no está calibrado ni es una tasa de acierto demostrada.",
             ("El modelo simula prórrogas de forma aproximada para mercados que las incluyen; no equivale a una liquidación oficial exacta." if provider_name == "OddsPapi" else "El modelo base simula tiempo reglamentario; las cuotas FT de HoopsAPI incluyen prórroga. La comparación de probabilidades no es perfectamente equivalente."),
-            "Filtro estricto: solo se muestran y combinan selecciones con probabilidad estimada por el modelo >= 65%; esto no significa que el 65% esté calibrado o validado.",
-            "La probabilidad combinada multiplica las probabilidades de las piernas y supone independencia aproximada entre partidos.",
+            "Filtro reforzado: cada pierna debe superar 70% tras un descuento de incertidumbre de 2 puntos; exige simulación bruta >=72%, mercado sin margen >=60% y brecha modelo-mercado <=12 puntos porcentuales.",
+            "El análisis automático exige precios emparejados de al menos 3 casas y dispersión máxima de 4 puntos porcentuales entre ellas.",
+            "Se exigen al menos 12 partidos históricos completos por equipo y cuotas capturadas en los últimos 15 minutos.",
+            "La probabilidad combinada multiplica las probabilidades de las piernas y supone independencia aproximada entre partidos; no estima correlaciones.",
+            "El motor actual no incorpora de forma fiable lesiones, titulares confirmados, minutos esperados, descanso ni viajes; los cambios de plantel no están modelados.",
+            "El motor se apoya principalmente en puntos y posesiones; todavía no aprovecha de forma completa tiro, rebotes, pérdidas ni métricas de jugadores.",
             "Solo se analizan competiciones y equipos con estadísticas históricas locales suficientes; no se inventan datos faltantes.",
-            "El historial usa una ventana móvil de hasta 400 días de la misma competición e incluye temporadas anteriores; los cambios de plantel no están modelados.",
-            "Las cuotas se filtran por captura de hasta 60 minutos y pueden cambiar antes de apostar.",
+            "El historial usa una ventana móvil de hasta 400 días de la misma competición e incluye temporadas anteriores.",
+            "Las cuotas de terceros pueden cambiar antes de apostar.",
         ]
         excluded_competitions = sorted(
             label for label in imported_competition_labels
@@ -1657,6 +1719,16 @@ async def recommend_parlay(request: Request):
             "eligible_market_selections": len(all_candidates),
             "candidates_before_probability_filter": candidates_before_probability_filter,
             "minimum_estimated_leg_probability": probability_floor,
+            "minimum_history_games": minimum_history,
+            "risk_controls": {
+                "minimum_raw_model_probability": MIN_RAW_MODEL_PROBABILITY,
+                "minimum_market_probability": MIN_MARKET_PROBABILITY,
+                "maximum_model_market_gap_pp": MAX_MODEL_MARKET_GAP * 100.0,
+                "minimum_automatic_bookmaker_consensus": MIN_AUTOMATIC_BOOKMAKER_CONSENSUS,
+                "maximum_market_dispersion_pp": MAX_MARKET_DISPERSION * 100.0,
+                "maximum_quote_age_minutes": MAX_QUOTE_AGE_SECONDS / 60.0,
+                "uncertainty_haircut_pp": PROBABILITY_UNCERTAINTY_HAIRCUT * 100.0,
+            },
             "top_picks": top_picks,
             "best_parlay": best_parlay,
             "warnings": warnings,

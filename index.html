@@ -516,9 +516,11 @@ function parlayCandidateHtml(c,index){
  return '<article class="record"><strong>'+safe(c.game)+'</strong>'+
  '<p>'+safe(c.competition)+' · '+kickoff+'</p>'+
  '<p><strong>'+safe(c.market_label)+' · '+safe(c.selection)+'</strong></p>'+
- '<p>Cuota '+Number(c.odds).toFixed(2)+' · '+safe(c.bookmaker)+' · Probabilidad estimada ajustada '+pct(c.probability)+'</p>'+
- '<p>Mercado sin margen '+pct(c.market_probability)+' · Diferencia '+Number(c.edge_percentage_points).toFixed(1)+' puntos · EV teórico '+Number(c.expected_value_per_unit).toFixed(3)+'</p>'+
- '<p>Muestra: '+c.home_history_games+'/'+c.away_history_games+' partidos · Cuotas capturadas: '+safe(c.odds_captured_at)+'</p>'+
+ '<p>Cuota '+Number(c.odds).toFixed(2)+' · '+safe(c.bookmaker)+' · Probabilidad conservadora '+pct(c.probability)+'</p>'+
+ '<p>Proyección base: '+Number(c.projected_home_points).toFixed(1)+'–'+Number(c.projected_away_points).toFixed(1)+' · Total '+Number(c.projected_total_points).toFixed(1)+' puntos · Ritmo '+Number(c.projected_pace).toFixed(1)+'</p>'+
+ '<p>Simulación bruta '+pct(c.raw_model_probability)+' · Mercado sin margen '+pct(c.market_probability)+' · Casas de consenso '+Number(c.market_consensus_bookmakers||0)+' · Dispersión '+Number(c.market_probability_range_pp||0).toFixed(1)+' pp</p>'+
+ '<p>Ventaja conservadora '+Number(c.edge_percentage_points).toFixed(1)+' pp · EV teórico '+Number(c.expected_value_per_unit).toFixed(3)+'</p>'+
+ '<p>Muestra: '+c.home_history_games+'/'+c.away_history_games+' partidos · '+Number(c.simulation_count||25000).toLocaleString('es-AR')+' simulaciones · Cuotas capturadas: '+safe(c.odds_captured_at)+'</p>'+
  '<button class="action secondary" type="button" data-save-index="'+index+'">Guardar este pick</button></article>';
 }
 async function checkHoopsApi(){
@@ -566,7 +568,7 @@ document.getElementById('build-bookmaker-parlay').addEventListener('click',async
   parlayMessage.textContent='Enviando '+offers.length+' mercados guardados de '+house+' y el historial local al modelo…';
   const response=await fetch(base+'/api/parlay/bookmaker-recommend',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
    house,window_start:new Date(start).toISOString(),window_end:new Date(end).toISOString(),
-   target_odds:target,simulations:10000,minimum_history_games:8,
+   target_odds:target,simulations:25000,minimum_history_games:12,
    games,team_stats:teamStats,offers
   })});
   let data;try{data=await response.json();}catch(_){throw new Error('El servidor devolvió una respuesta no válida.');}
@@ -662,12 +664,12 @@ document.getElementById('build-parlay').addEventListener('click',async()=>{
   parlayMessage.textContent='Consultando calendario y cuotas del proveedor configurado. Enviando '+games.length+' partidos históricos y '+teamStats.length+' registros de equipo…';
   const response=await fetch(base+'/api/parlay/recommend',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
    window_start:new Date(start).toISOString(),window_end:new Date(end).toISOString(),target_odds:target,
-   simulations:10000,minimum_history_games:8,games:games,team_stats:teamStats
+   simulations:25000,minimum_history_games:12,games:games,team_stats:teamStats
   })});
   let data;try{data=await response.json();}catch(_){throw new Error('El servidor devolvió una respuesta no válida.');}
   if(!response.ok)throw new Error(data.detail||('HTTP '+response.status));
   lastRecommendation=data;
-  const stats='<p>Partidos con cuotas en la ventana: '+data.matches_in_window+' · Competiciones compatibles: '+Number(data.matches_matching_imported_competitions||0)+' · Analizados: '+data.matches_analysed+' · Mercados elegibles: '+data.eligible_market_selections+'</p>';
+  const stats='<p>Partidos con cuotas en la ventana: '+data.matches_in_window+' · Competiciones compatibles: '+Number(data.matches_matching_imported_competitions||0)+' · Analizados: '+data.matches_analysed+' · Picks que superan filtros: '+data.eligible_market_selections+'</p><p><strong>Filtros:</strong> '+pct(data.minimum_estimated_leg_probability)+' mínimo conservador · '+Number(data.minimum_history_games||12)+' partidos históricos por equipo · cuotas recientes y consenso de al menos 3 casas.</p>';
   const skips=data.skipped&&Object.keys(data.skipped).length?'<p class="small">No analizados: '+Object.entries(data.skipped).map(([k,v])=>safe(k)+' ('+v+')').join(' · ')+'</p>':'';
   const diagnostic='<details class="small" style="margin:10px 0" open><summary>Diagnóstico de datos y competiciones</summary>'+
    '<p>Filas locales: '+Number(data.local_games_count||0)+' partidos · '+Number(data.local_team_stats_count||0)+' registros de equipo.</p>'+
@@ -682,7 +684,7 @@ document.getElementById('build-parlay').addEventListener('click',async()=>{
   if(data.top_picks&&data.top_picks.length){
    body+='<h3>Mejores picks individuales encontrados</h3>'+data.top_picks.slice(0,8).map((c,i)=>parlayCandidateHtml(c,i)).join('');
   }else{
-   body+='<p class="notice">No se encontró un pick con ventaja estimada positiva y cuotas recientes. No se fuerza una recomendación.</p>';
+   body+='<p class="notice">Ningún mercado superó todos los filtros reforzados (70% conservador, simulación y mercado concordantes, muestra suficiente y cuotas frescas). No se fuerza una recomendación.</p>';
   }
   if(data.best_parlay){
    body+='<hr style="border-color:var(--line);border-width:1px 0 0;margin:14px 0"><h3>Combinada propuesta</h3>'+
@@ -697,7 +699,7 @@ document.getElementById('build-parlay').addEventListener('click',async()=>{
   parlayResult.innerHTML=body;
   parlayMessage.textContent='Análisis terminado. Se revisaron hasta '+data.matches_scanned+' partidos de la ventana horaria.';
  }catch(error){parlayMessage.textContent='No se pudo armar la combinada: '+error.message;}
- finally{button.disabled=false;button.textContent='Consultar HoopsAPI: buscar picks y armar combinada';}
+ finally{button.disabled=false;button.textContent='Buscar picks y combinada automática · filtro 70%+';}
 });
 parlayResult.addEventListener('click',async event=>{
  const saveIndex=event.target.dataset.saveIndex;
