@@ -1868,3 +1868,240 @@ async def recommend_parlay(request: Request):
         except ImportError:
             pass
         raise HTTPException(status_code=500, detail=f"parlay_analysis_failed:{type(exc).__name__}") from exc
+
+
+# ---------------------------------------------------------------------------
+# Walk-forward backtest: measures how often the model's win probabilities were
+# right on games that already happened, using only information available
+# before each game. It changes no pick logic; it only reports calibration.
+# ---------------------------------------------------------------------------
+
+BACKTEST_THRESHOLDS = (0.55, 0.60, 0.65, 0.70, 0.75, 0.80)
+BACKTEST_BUCKET_EDGES = (0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 1.01)
+
+
+def _wilson_lower_bound(hits: int, n: int, z: float = 1.96) -> float | None:
+    if n <= 0:
+        return None
+    p = hits / n
+    denom = 1.0 + z * z / n
+    centre = p + z * z / (2.0 * n)
+    margin = z * math.sqrt((p * (1.0 - p) + z * z / (4.0 * n)) / n)
+    return max(0.0, (centre - margin) / denom)
+
+
+def _summarise_backtest(rows: list[dict]) -> dict:
+    n = len(rows)
+    if n == 0:
+        return {"games": 0}
+    brier = sum((r["p_home"] - (1.0 if r["home_won"] else 0.0)) ** 2 for r in rows) / n
+    base_rate = sum(1 for r in rows if r["home_won"]) / n
+    baseline_brier = sum((base_rate - (1.0 if r["home_won"] else 0.0)) ** 2 for r in rows) / n
+    log_loss = 0.0
+    for r in rows:
+        p = min(max(r["p_home"], 1e-4), 1.0 - 1e-4)
+        log_loss -= math.log(p if r["home_won"] else 1.0 - p)
+    log_loss /= n
+
+    favourites = []
+    for r in rows:
+        p_fav = max(r["p_home"], 1.0 - r["p_home"])
+        fav_won = r["home_won"] if r["p_home"] >= 0.5 else (not r["home_won"])
+        favourites.append((p_fav, fav_won))
+
+    thresholds = []
+    for threshold in BACKTEST_THRESHOLDS:
+        picked = [(p, w) for p, w in favourites if p >= threshold]
+        hits = sum(1 for _, w in picked if w)
+        count = len(picked)
+        thresholds.append({
+            "model_probability_at_least": threshold,
+            "games": count,
+            "hit_rate": hits / count if count else None,
+            "hit_rate_95_lower_bound": _wilson_lower_bound(hits, count),
+            "mean_predicted_probability": (sum(p for p, _ in picked) / count) if count else None,
+        })
+
+    buckets = []
+    for low, high in zip(BACKTEST_BUCKET_EDGES[:-1], BACKTEST_BUCKET_EDGES[1:]):
+        picked = [(p, w) for p, w in favourites if low <= p < high]
+        hits = sum(1 for _, w in picked if w)
+        count = len(picked)
+        buckets.append({
+            "range": f"{low:.2f}-{min(high, 1.0):.2f}",
+            "games": count,
+            "mean_predicted_probability": (sum(p for p, _ in picked) / count) if count else None,
+            "hit_rate": hits / count if count else None,
+        })
+
+    total_error = sum(abs(r["projected_total"] - r["actual_total"]) for r in rows) / n
+    margin_error = sum(abs(r["projected_margin"] - r["actual_margin"]) for r in rows) / n
+    return {
+        "games": n,
+        "favourite_accuracy": sum(1 for _, w in favourites if w) / n,
+        "home_win_rate_in_sample": base_rate,
+        "brier_score": brier,
+        "brier_score_always_home_baseline": baseline_brier,
+        "brier_beats_baseline": brier < baseline_brier,
+        "log_loss": log_loss,
+        "mean_abs_error_total_points": total_error,
+        "mean_abs_error_margin_points": margin_error,
+        "by_threshold": thresholds,
+        "calibration_buckets": buckets,
+    }
+
+
+def _run_backtest(all_games: list[dict], all_stats: list[dict], simulations: int,
+                  minimum_history: int, max_games: int, competition_filter: str,
+                  time_budget_seconds: float) -> dict:
+    import time as _time
+    started = _time.monotonic()
+    points_by_event: dict[str, dict[str, float]] = {}
+    for row in all_stats:
+        if not isinstance(row, dict):
+            continue
+        event_id = str(row.get("event_id") or "").strip()
+        team = str(row.get("team") or "").strip()
+        try:
+            points = float(row.get("points"))
+        except (TypeError, ValueError):
+            continue
+        if event_id and team and math.isfinite(points):
+            points_by_event.setdefault(event_id, {})[team] = points
+
+    candidates: list[tuple[datetime, dict]] = []
+    wanted = _normalise_competition(competition_filter) if competition_filter else ""
+    for game in all_games:
+        if not isinstance(game, dict):
+            continue
+        if str(game.get("status") or "").strip().lower() not in TERMINAL_STATUSES:
+            continue
+        if wanted and _normalise_competition(game.get("competition")) != wanted:
+            continue
+        event_id = str(game.get("event_id") or "").strip()
+        home = str(game.get("home_team") or "").strip()
+        away = str(game.get("away_team") or "").strip()
+        per_team = points_by_event.get(event_id, {})
+        if not event_id or home not in per_team or away not in per_team:
+            continue
+        try:
+            played = _historical_datetime(game.get("event_time"), "event_time")
+        except ValueError:
+            continue
+        candidates.append((played, game))
+    candidates.sort(key=lambda item: item[0])
+    candidates = candidates[-max_games:]
+
+    rows: list[dict] = []
+    per_competition: dict[str, list[dict]] = {}
+    skipped: dict[str, int] = {}
+    timed_out = False
+    for played, game in candidates:
+        if _time.monotonic() - started > time_budget_seconds:
+            timed_out = True
+            break
+        event_id = str(game.get("event_id")).strip()
+        home = str(game.get("home_team")).strip()
+        away = str(game.get("away_team")).strip()
+        actual_home = points_by_event[event_id][home]
+        actual_away = points_by_event[event_id][away]
+        if actual_home == actual_away:
+            skipped["tied_final_score"] = skipped.get("tied_final_score", 0) + 1
+            continue
+        fixture = {
+            "competition": game.get("competition"),
+            "home": home, "away": away,
+            "start_time": played.isoformat(),
+            "game_id": event_id,
+        }
+        try:
+            history, _, comp, _, h_name, a_name, priors, h_rates, a_rates = _history_scope_for_fixture(
+                fixture, all_games, all_stats, played
+            )
+            if h_rates.games < minimum_history or a_rates.games < minimum_history:
+                skipped["historial_insuficiente"] = skipped.get("historial_insuficiente", 0) + 1
+                continue
+            try:
+                adjusted = fit_opponent_adjusted_ratings(
+                    history, as_of=played - timedelta(seconds=1),
+                    league_ppp=priors.points_per_possession,
+                )
+            except ValueError:
+                adjusted = None
+            projection = project_game(h_rates, a_rates, priors, adjusted_ratings=adjusted)
+            seed = 20261123 + sum(ord(ch) for ch in event_id)
+            simulation = _simulate_game_for_settlement(
+                projection, simulations=simulations, seed=seed, overtime_rule="includes_overtime"
+            )
+        except (ValueError, TypeError, RuntimeError) as exc:
+            key = str(exc).split(":")[0][:60]
+            skipped[key] = skipped.get(key, 0) + 1
+            continue
+        wins = sum(1 for h, a in zip(simulation.home_scores, simulation.away_scores) if h > a)
+        row = {
+            "p_home": wins / simulation.simulation_count,
+            "home_won": actual_home > actual_away,
+            "projected_total": projection.home_points_mean + projection.away_points_mean,
+            "actual_total": actual_home + actual_away,
+            "projected_margin": projection.home_points_mean - projection.away_points_mean,
+            "actual_margin": actual_home - actual_away,
+        }
+        rows.append(row)
+        per_competition.setdefault(str(comp), []).append(row)
+
+    summary = _summarise_backtest(rows)
+    return {
+        "status": "WALK_FORWARD_BACKTEST",
+        "summary": summary,
+        "by_competition": {name: _summarise_backtest(items) for name, items in sorted(per_competition.items())},
+        "games_considered": len(candidates),
+        "games_evaluated": len(rows),
+        "skipped": skipped,
+        "timed_out": timed_out,
+        "settings": {
+            "simulations": simulations, "minimum_history_games": minimum_history,
+            "max_games": max_games, "competition": competition_filter or None,
+            "settlement": "includes_overtime",
+        },
+        "notes": [
+            "Cada partido se predijo usando solo partidos terminados al menos 24 h antes (sin mirar el futuro).",
+            "Mide la probabilidad de victoria del modelo puro, sin mezclarla con cuotas; las cuotas históricas no están guardadas.",
+            "Si el acierto real de un tramo es menor que la probabilidad predicha, el modelo está sobreconfiado en ese tramo.",
+            "Una muestra chica (menos de unos 100 partidos por tramo) deja mucha incertidumbre; mirá el límite inferior del 95%.",
+        ],
+    }
+
+
+@app.post("/api/backtest")
+async def backtest(request: Request):
+    try:
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            raise ValueError("request_body_must_be_object")
+        all_games = payload.get("games")
+        all_stats = payload.get("team_stats")
+        if not isinstance(all_games, list) or not isinstance(all_stats, list):
+            raise ValueError("local_games_and_team_stats_must_be_arrays")
+        if len(all_games) > 20000 or len(all_stats) > 40000:
+            raise ValueError("too_many_local_rows")
+        simulations = int(payload.get("simulations", 2000))
+        if not 1000 <= simulations <= 10000:
+            raise ValueError("simulations_must_be_between_1000_and_10000")
+        minimum_history = int(payload.get("minimum_history_games", MIN_HISTORICAL_GAMES))
+        if not 8 <= minimum_history <= 30:
+            raise ValueError("minimum_history_games_must_be_between_8_and_30")
+        max_games = int(payload.get("max_games", 250))
+        if not 20 <= max_games <= 600:
+            raise ValueError("max_games_must_be_between_20_and_600")
+        competition = str(payload.get("competition") or "").strip()
+        result = await run_in_threadpool(
+            _run_backtest, all_games, all_stats, simulations, minimum_history,
+            max_games, competition, 45.0,
+        )
+        result["local_games_count"] = len(all_games)
+        result["local_team_stats_count"] = len(all_stats)
+        return result
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"backtest_failed:{type(exc).__name__}") from exc
