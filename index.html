@@ -444,7 +444,9 @@ async function persistSportApiData(data,refreshAfter=true){
 }
 function sportApiRemaining(quota){
   if(!quota||typeof quota!=='object')return null;
-  const values=['daily_remaining','monthly_remaining'].map(key=>Number(quota[key])).filter(value=>Number.isFinite(value)&&value>=0);
+  const values=['daily_remaining','monthly_remaining']
+    .filter(key=>quota[key]!==null&&quota[key]!==undefined&&quota[key]!=='')
+    .map(key=>Number(quota[key])).filter(value=>Number.isFinite(value)&&value>=0);
   return values.length?Math.min(...values):null;
 }
 function sportApiQuotaText(quota){
