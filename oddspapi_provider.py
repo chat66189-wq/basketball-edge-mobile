@@ -675,8 +675,10 @@ def _competition_key(value: str) -> str:
     compact = re.sub(r"[^a-z0-9]+", "", label)
     if not compact:
         return ""
-    if "wnba" in compact:
+    if "wnba" in compact or "womensnationalbasketballassociation" in compact:
         return "wnba"
+    if compact in {"nbl", "nblmen", "nationalbasketballleague", "nationalbasketballleaguemen", "australiannbl", "australiannationalbasketballleague"}:
+        return "nbl"
     if "euroleague" in compact:
         return "euroleague" + ("women" if "women" in compact or "female" in compact else "")
     if "eurocup" in compact:
