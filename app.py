@@ -1594,7 +1594,10 @@ async def recommend_parlay(request: Request):
         if not 8 <= minimum_history <= 30:
             raise ValueError("minimum_history_games_must_be_between_8_and_30")
         minimum_history = max(MIN_HISTORICAL_GAMES, minimum_history)
-        best_effort_requested = bool(payload.get("best_effort", False))
+        best_effort_value = payload.get("best_effort", False)
+        if not isinstance(best_effort_value, bool):
+            raise ValueError("best_effort_must_be_boolean")
+        best_effort_requested = best_effort_value
         all_games = payload.get("games")
         all_stats = payload.get("team_stats")
         if not isinstance(all_games, list) or not isinstance(all_stats, list):
@@ -1904,6 +1907,10 @@ async def recommend_parlay(request: Request):
             "relaxed_candidate_count": max(0, len(all_candidates) - len(strict_candidates)),
             "candidates_before_probability_filter": candidates_before_probability_filter,
             "minimum_estimated_leg_probability": probability_floor,
+            "active_minimum_estimated_leg_probability": (
+                BEST_EFFORT_MIN_ESTIMATED_LEG_PROBABILITY
+                if best_effort_fallback_attempted else MIN_ESTIMATED_LEG_PROBABILITY
+            ),
             "best_effort": {
                 "requested": best_effort_requested,
                 "fallback_attempted": best_effort_fallback_attempted,
