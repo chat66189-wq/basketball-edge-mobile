@@ -1345,12 +1345,12 @@ async def recommend_bookmaker_parlay(request: Request):
         for candidate in best_by_selection.values():
             previous = best_by_game.get(candidate["event_id"])
             if previous is None or (
-                candidate["score"], candidate["probability"]
-            ) > (previous["score"], previous["probability"]):
+                candidate["probability"], candidate["edge_percentage_points"], candidate["score"]
+            ) > (previous["probability"], previous["edge_percentage_points"], previous["score"]):
                 best_by_game[candidate["event_id"]] = candidate
         top_picks = sorted(
             best_by_game.values(),
-            key=lambda item: (item["score"], item["probability"]),
+            key=lambda item: (item["probability"], item["edge_percentage_points"], item["score"]),
             reverse=True,
         )[:12]
 
@@ -1362,9 +1362,15 @@ async def recommend_bookmaker_parlay(request: Request):
             per_game = {}
             for item in items:
                 old = per_game.get(item["event_id"])
-                if old is None or item["score"] > old["score"]:
+                if old is None or (
+                    item["probability"], item["edge_percentage_points"], item["score"]
+                ) > (old["probability"], old["edge_percentage_points"], old["score"]):
                     per_game[item["event_id"]] = item
-            pool = sorted(per_game.values(), key=lambda item: item["score"], reverse=True)[:18]
+            pool = sorted(
+                per_game.values(),
+                key=lambda item: (item["probability"], item["edge_percentage_points"], item["score"]),
+                reverse=True,
+            )[:18]
             local_best = None
             target_min, target_max = _parlay_odds_band(target_odds)
             for leg_count in range(1, min(8, len(pool)) + 1):
@@ -1627,10 +1633,15 @@ async def recommend_parlay(request: Request):
         best_by_game = {}
         for candidate in best_by_selection.values():
             previous = best_by_game.get(candidate["event_id"])
-            if previous is None or (candidate["score"], candidate["probability"]) > (previous["score"], previous["probability"]):
+            if previous is None or (
+                candidate["probability"], candidate["edge_percentage_points"], candidate["score"]
+            ) > (previous["probability"], previous["edge_percentage_points"], previous["score"]):
                 best_by_game[candidate["event_id"]] = candidate
-        top_picks = sorted(best_by_game.values(),
-                           key=lambda x: (x["score"], x["probability"]), reverse=True)[:12]
+        top_picks = sorted(
+            best_by_game.values(),
+            key=lambda x: (x["probability"], x["edge_percentage_points"], x["score"]),
+            reverse=True,
+        )[:12]
 
         # A real single-bookmaker accumulator needs every leg at the same operator.
         by_bookmaker: dict[str, list[dict]] = {}
@@ -1641,9 +1652,15 @@ async def recommend_parlay(request: Request):
             per_game = {}
             for item in items:
                 old = per_game.get(item["event_id"])
-                if old is None or item["score"] > old["score"]:
+                if old is None or (
+                    item["probability"], item["edge_percentage_points"], item["score"]
+                ) > (old["probability"], old["edge_percentage_points"], old["score"]):
                     per_game[item["event_id"]] = item
-            pool = sorted(per_game.values(), key=lambda x: x["score"], reverse=True)[:18]
+            pool = sorted(
+                per_game.values(),
+                key=lambda x: (x["probability"], x["edge_percentage_points"], x["score"]),
+                reverse=True,
+            )[:18]
             local_best = None
             target_min, target_max = _parlay_odds_band(target_odds)
             for leg_count in range(1, min(8, len(pool)) + 1):
