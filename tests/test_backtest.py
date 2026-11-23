@@ -114,3 +114,13 @@ class BacktestEligibleLeaguesTests(unittest.TestCase):
         unfiltered = app_module._run_backtest(
             games + tiny_games, stats + tiny_stats, 1000, 8, 120, "", 60.0, False)
         self.assertEqual(unfiltered["excluded_competitions"], [])
+
+
+@unittest.skipIf(app_module is None, "fastapi is not installed")
+class BacktestTimeBudgetTests(unittest.TestCase):
+    def test_timeout_drops_oldest_games_not_newest(self):
+        games, stats = synthetic_league(games=200)
+        result = app_module._run_backtest(games, stats, 1000, 8, 120, "", 0.0, False)
+        # Zero budget evaluates nothing and reports the cut, instead of failing.
+        self.assertTrue(result["timed_out"])
+        self.assertEqual(result["games_evaluated"], 0)
