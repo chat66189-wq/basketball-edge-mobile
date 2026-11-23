@@ -470,6 +470,9 @@ _EUROLEAGUE_TEAM_ALIASES = {
     "besiktasjk": "besiktasistanbul",
     "paris": "parisbasketball",
     "crvenazvezda": "crvenazvezdameridianbetbelgrade",
+    "kkcrvenazvezdabelgrade": "crvenazvezdameridianbetbelgrade",
+    "crvenazvezdabelgrade": "crvenazvezdameridianbetbelgrade",
+    "asvellyonvilleurbanne": "ldlcasvelvilleurbanne",
     "bayernmunich": "fcbayernmunich",
     "maccabitelaviv": "maccabirapydtelaviv",
     "valenciabc": "valenciabasket",
@@ -872,7 +875,8 @@ def _fixture_market_groups(fixture: dict, now: datetime) -> dict:
 def _score_fixture(fixture: dict, all_games: list[dict], all_stats: list[dict],
                    simulations: int, minimum_history: int, now: datetime,
                    manual_groups: dict | None = None,
-                   overtime_rule: str = "regulation_only") -> tuple[list[dict], str | None]:
+                   overtime_rule: str = "regulation_only",
+                   diagnostics: dict | None = None) -> tuple[list[dict], str | None]:
     start_time = _aware_datetime(fixture.get("start_time"), "fixture_start_time")
     history, counters, competition, season, home, away, priors, home_rates, away_rates = _history_scope_for_fixture(
         fixture, all_games, all_stats, start_time
@@ -896,6 +900,12 @@ def _score_fixture(fixture: dict, all_games: list[dict], all_stats: list[dict],
 
     groups = manual_groups if manual_groups is not None else _fixture_market_groups(fixture, now)
     output = []
+    if diagnostics is not None:
+        diagnostics["market_groups_seen"] = diagnostics.get("market_groups_seen", 0) + len(groups)
+
+    def reject(reason: str) -> None:
+        if diagnostics is not None:
+            diagnostics[reason] = diagnostics.get(reason, 0) + 1
     # Limit the influence of an unvalidated local model; anchor it to market consensus.
     shrink = min(0.35, min(home_rates.games, away_rates.games) / 40.0)
     for (market, line), quotes in groups.items():
@@ -909,6 +919,7 @@ def _score_fixture(fixture: dict, all_games: list[dict], all_stats: list[dict],
                     quote["side_b"]: inv_b / total,
                 })
         if not fair_samples:
+            reject("no_paired_market_prices")
             continue
 
         sides = ("home", "away") if market in ("moneyline", "spread") else ("over", "under")
@@ -917,6 +928,7 @@ def _score_fixture(fixture: dict, all_games: list[dict], all_stats: list[dict],
             if str(q.get("bookmaker") or "").strip()
         })
         if manual_groups is None and bookmaker_count < MIN_AUTOMATIC_BOOKMAKER_CONSENSUS:
+            reject("fewer_than_3_bookmakers")
             continue
 
         fair = {}
@@ -930,6 +942,7 @@ def _score_fixture(fixture: dict, all_games: list[dict], all_stats: list[dict],
             )
             market_ranges_pp[fair_side] = (values[-1] - values[0]) * 100.0
         if manual_groups is None and max(market_ranges_pp.values(), default=0.0) > MAX_MARKET_DISPERSION * 100.0:
+            reject("market_dispersion_over_4pp")
             continue
 
         for side in sides:
@@ -945,20 +958,25 @@ def _score_fixture(fixture: dict, all_games: list[dict], all_stats: list[dict],
                 continue
             no_push_total = raw_win + raw_loss
             if no_push_total <= 0 or push > 0.005:
+                reject("push_probability_over_0_5pp")
                 continue
 
             raw_conditional = raw_win / no_push_total
             model_market_gap = abs(raw_conditional - fair[side])
             if raw_conditional < MIN_RAW_MODEL_PROBABILITY:
+                reject("model_probability_below_72pct")
                 continue
             if fair[side] < MIN_MARKET_PROBABILITY:
+                reject("no_vig_market_probability_below_60pct")
                 continue
             if model_market_gap > MAX_MODEL_MARKET_GAP:
+                reject("model_market_gap_over_12pp")
                 continue
 
             blended = fair[side] + shrink * (raw_conditional - fair[side])
             conservative_probability = max(0.0, blended - PROBABILITY_UNCERTAINTY_HAIRCUT)
             if conservative_probability < MIN_ESTIMATED_LEG_PROBABILITY:
+                reject("conservative_probability_below_70pct")
                 continue
 
             for quote in quotes:
@@ -971,6 +989,7 @@ def _score_fixture(fixture: dict, all_games: list[dict], all_stats: list[dict],
                 ev = conservative_probability * price - 1.0
                 edge = conservative_probability - fair[side]
                 if edge <= 0.015 or ev <= 0.01:
+                    reject("edge_or_expected_value_not_positive_enough")
                     continue
                 label = {
                     "moneyline": "Ganador",
@@ -1026,6 +1045,8 @@ def _score_fixture(fixture: dict, all_games: list[dict], all_stats: list[dict],
                     "settlement": overtime_rule,
                     "score": edge * 0.6 + min(ev, 0.5) * 0.4,
                 })
+                if diagnostics is not None:
+                    diagnostics["selections_passing_all_filters"] = diagnostics.get("selections_passing_all_filters", 0) + 1
     return output, None
 
 
@@ -1596,6 +1617,7 @@ async def recommend_parlay(request: Request):
         skipped: dict[str, int] = {}
         history_skip_examples: list[str] = []
         team_name_skip_examples: list[str] = []
+        filter_diagnostics: dict[str, int] = {}
         analysed = 0
         for fixture in scan_games:
             if not fixture.get("home") or not fixture.get("away"):
@@ -1606,7 +1628,7 @@ async def recommend_parlay(request: Request):
                 candidates, reason = await run_in_threadpool(
                     _score_fixture,
                     fixture, all_games, all_stats, simulations, minimum_history, now,
-                    overtime_rule=overtime_rule,
+                    overtime_rule=overtime_rule, diagnostics=filter_diagnostics,
                 )
                 if reason:
                     skipped[reason.split(":")[0]] = skipped.get(reason.split(":")[0], 0) + 1
@@ -1762,6 +1784,9 @@ async def recommend_parlay(request: Request):
             ),
             "local_games_count": len(all_games),
             "local_team_stats_count": len(all_stats),
+            "modelable_competitions": modelable_competition_labels,
+            "competition_history_audit": competition_history_audit,
+            "filter_diagnostics": filter_diagnostics,
             "imported_competitions": sorted({
                 str(g.get("competition") or "").strip()
                 for g in all_games if isinstance(g, dict) and str(g.get("competition") or "").strip()
