@@ -46,7 +46,8 @@ def _get(path, params=None, ttl=0):
     return data
 
 def status():
-    data=_get("basketball/leagues",ttl=600)
+    # The league catalogue may be cached, but quota headers must always be fresh.
+    data=_get("basketball/leagues",ttl=0)
     leagues=data.get("data") or []
     return {"configured":True,"provider":"SportAPI.ai","league_count":len(leagues),"quota":data.get("_quota")}
 
