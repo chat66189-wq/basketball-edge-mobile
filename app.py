@@ -1956,7 +1956,7 @@ def _summarise_backtest(rows: list[dict]) -> dict:
 
 def _run_backtest(all_games: list[dict], all_stats: list[dict], simulations: int,
                   minimum_history: int, max_games: int, competition_filter: str,
-                  time_budget_seconds: float) -> dict:
+                  time_budget_seconds: float, only_eligible_leagues: bool = True) -> dict:
     import time as _time
     started = _time.monotonic()
     points_by_event: dict[str, dict[str, float]] = {}
@@ -1993,6 +1993,22 @@ def _run_backtest(all_games: list[dict], all_stats: list[dict], simulations: int
             continue
         candidates.append((played, game))
     candidates.sort(key=lambda item: item[0])
+    excluded_competitions: list[str] = []
+    if only_eligible_leagues and candidates:
+        # Do not spend the game budget on leagues that never reach the minimum
+        # history (for example NCAA with hundreds of teams).
+        latest = candidates[-1][0] + timedelta(hours=25)
+        eligible_labels, _ = _modelable_competition_labels(all_games, all_stats, minimum_history, latest)
+        eligible_keys = {_normalise_competition(label) for label in eligible_labels}
+        kept = [
+            item for item in candidates
+            if _normalise_competition(item[1].get("competition")) in eligible_keys
+        ]
+        excluded_competitions = sorted({
+            str(item[1].get("competition") or "").strip() for item in candidates
+            if _normalise_competition(item[1].get("competition")) not in eligible_keys
+        })
+        candidates = kept
     candidates = candidates[-max_games:]
 
     rows: list[dict] = []
@@ -2061,8 +2077,10 @@ def _run_backtest(all_games: list[dict], all_stats: list[dict], simulations: int
         "games_evaluated": len(rows),
         "skipped": skipped,
         "timed_out": timed_out,
+        "excluded_competitions": excluded_competitions,
         "settings": {
             "simulations": simulations, "minimum_history_games": minimum_history,
+            "only_eligible_leagues": only_eligible_leagues,
             "max_games": max_games, "competition": competition_filter or None,
             "settlement": "includes_overtime",
         },
@@ -2097,9 +2115,10 @@ async def backtest(request: Request):
         if not 20 <= max_games <= 600:
             raise ValueError("max_games_must_be_between_20_and_600")
         competition = str(payload.get("competition") or "").strip()
+        only_eligible = bool(payload.get("only_eligible_leagues", True))
         result = await run_in_threadpool(
             _run_backtest, all_games, all_stats, simulations, minimum_history,
-            max_games, competition, 45.0,
+            max_games, competition, 45.0, only_eligible,
         )
         result["local_games_count"] = len(all_games)
         result["local_team_stats_count"] = len(all_stats)
