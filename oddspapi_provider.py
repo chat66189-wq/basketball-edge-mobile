@@ -878,7 +878,8 @@ def games(
             ttl=0,
         )
         if isinstance(odds, dict):
-            normalized_fixture = _normalise_odds_fixture(fixture, odds, market_families, now)
+            observed_at = datetime.now(timezone.utc)
+            normalized_fixture = _normalise_odds_fixture(fixture, odds, market_families, observed_at)
             normalized.append(normalized_fixture)
             for key in audit_fields:
                 odds_data_audit[key] += int((normalized_fixture.get("odds_audit") or {}).get(key) or 0)
