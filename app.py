@@ -73,6 +73,13 @@ MIN_HISTORICAL_GAMES = 12
 PROBABILITY_UNCERTAINTY_HAIRCUT = 0.02
 PARLAY_ODDS_TOLERANCE_FRACTION = 0.05
 
+# Best-effort is a visibly weaker fallback, never a substitute for strict screening.
+BEST_EFFORT_MIN_RAW_MODEL_PROBABILITY = 0.60
+BEST_EFFORT_MIN_MARKET_PROBABILITY = 0.55
+BEST_EFFORT_MAX_MODEL_MARKET_GAP = 0.15
+BEST_EFFORT_MIN_ESTIMATED_LEG_PROBABILITY = 0.58
+BEST_EFFORT_MIN_EXPECTED_VALUE = -0.08
+
 
 def _parlay_odds_band(target_odds: float) -> tuple[float, float]:
     """Allow a narrow band around the requested combined price, not a minimum-only floor."""
@@ -885,7 +892,8 @@ def _score_fixture(fixture: dict, all_games: list[dict], all_stats: list[dict],
                    simulations: int, minimum_history: int, now: datetime,
                    manual_groups: dict | None = None,
                    overtime_rule: str = "regulation_only",
-                   diagnostics: dict | None = None) -> tuple[list[dict], str | None]:
+                   diagnostics: dict | None = None,
+                   relaxed: bool = False) -> tuple[list[dict], str | None]:
     start_time = _aware_datetime(fixture.get("start_time"), "fixture_start_time")
     history, counters, competition, season, home, away, priors, home_rates, away_rates = _history_scope_for_fixture(
         fixture, all_games, all_stats, start_time
@@ -972,20 +980,27 @@ def _score_fixture(fixture: dict, all_games: list[dict], all_stats: list[dict],
 
             raw_conditional = raw_win / no_push_total
             model_market_gap = abs(raw_conditional - fair[side])
-            if raw_conditional < MIN_RAW_MODEL_PROBABILITY:
-                reject("model_probability_below_72pct")
+            raw_minimum = BEST_EFFORT_MIN_RAW_MODEL_PROBABILITY if relaxed else MIN_RAW_MODEL_PROBABILITY
+            market_minimum = BEST_EFFORT_MIN_MARKET_PROBABILITY if relaxed else MIN_MARKET_PROBABILITY
+            gap_maximum = BEST_EFFORT_MAX_MODEL_MARKET_GAP if relaxed else MAX_MODEL_MARKET_GAP
+            conservative_minimum = (
+                BEST_EFFORT_MIN_ESTIMATED_LEG_PROBABILITY
+                if relaxed else MIN_ESTIMATED_LEG_PROBABILITY
+            )
+            if raw_conditional < raw_minimum:
+                reject("best_effort_model_probability_below_60pct" if relaxed else "model_probability_below_72pct")
                 continue
-            if fair[side] < MIN_MARKET_PROBABILITY:
-                reject("no_vig_market_probability_below_60pct")
+            if fair[side] < market_minimum:
+                reject("best_effort_market_probability_below_55pct" if relaxed else "no_vig_market_probability_below_60pct")
                 continue
-            if model_market_gap > MAX_MODEL_MARKET_GAP:
-                reject("model_market_gap_over_12pp")
+            if model_market_gap > gap_maximum:
+                reject("best_effort_model_market_gap_over_15pp" if relaxed else "model_market_gap_over_12pp")
                 continue
 
             blended = fair[side] + shrink * (raw_conditional - fair[side])
             conservative_probability = max(0.0, blended - PROBABILITY_UNCERTAINTY_HAIRCUT)
-            if conservative_probability < MIN_ESTIMATED_LEG_PROBABILITY:
-                reject("conservative_probability_below_70pct")
+            if conservative_probability < conservative_minimum:
+                reject("best_effort_conservative_probability_below_58pct" if relaxed else "conservative_probability_below_70pct")
                 continue
 
             for quote in quotes:
@@ -997,9 +1012,20 @@ def _score_fixture(fixture: dict, all_games: list[dict], all_stats: list[dict],
                     continue
                 ev = conservative_probability * price - 1.0
                 edge = conservative_probability - fair[side]
-                if edge <= 0.015 or ev <= 0.01:
+                if relaxed:
+                    if ev < BEST_EFFORT_MIN_EXPECTED_VALUE:
+                        reject("best_effort_expected_value_below_minus_8pct")
+                        continue
+                elif edge <= 0.015 or ev <= 0.01:
                     reject("edge_or_expected_value_not_positive_enough")
                     continue
+                passes_strict_filters = (
+                    raw_conditional >= MIN_RAW_MODEL_PROBABILITY
+                    and fair[side] >= MIN_MARKET_PROBABILITY
+                    and model_market_gap <= MAX_MODEL_MARKET_GAP
+                    and conservative_probability >= MIN_ESTIMATED_LEG_PROBABILITY
+                    and edge > 0.015 and ev > 0.01
+                )
                 label = {
                     "moneyline": "Ganador",
                     "spread": "Hándicap",
@@ -1031,6 +1057,8 @@ def _score_fixture(fixture: dict, all_games: list[dict], all_stats: list[dict],
                     "bookmaker": quote["bookmaker"],
                     "odds": price,
                     "probability": conservative_probability,
+                    "passes_strict_filters": passes_strict_filters,
+                    "selection_mode": "strict" if passes_strict_filters else "best_effort",
                     "raw_model_probability": raw_conditional,
                     "market_probability": fair[side],
                     "market_consensus_bookmakers": bookmaker_count,
@@ -1566,6 +1594,7 @@ async def recommend_parlay(request: Request):
         if not 8 <= minimum_history <= 30:
             raise ValueError("minimum_history_games_must_be_between_8_and_30")
         minimum_history = max(MIN_HISTORICAL_GAMES, minimum_history)
+        best_effort_requested = bool(payload.get("best_effort", False))
         all_games = payload.get("games")
         all_stats = payload.get("team_stats")
         if not isinstance(all_games, list) or not isinstance(all_stats, list):
@@ -1646,6 +1675,7 @@ async def recommend_parlay(request: Request):
                     _score_fixture,
                     fixture, all_games, all_stats, simulations, minimum_history, now,
                     overtime_rule=overtime_rule, diagnostics=filter_diagnostics,
+                    relaxed=best_effort_requested,
                 )
                 if reason:
                     skipped[reason.split(":")[0]] = skipped.get(reason.split(":")[0], 0) + 1
@@ -1663,77 +1693,94 @@ async def recommend_parlay(request: Request):
             except Exception:
                 skipped["analysis_error"] = skipped.get("analysis_error", 0) + 1
 
-        # Final safeguard: every displayed/combined leg must clear the conservative 70% floor.
+        # Keep strict candidates separate from relaxed alternatives. Best-effort never
+        # relaxes history, matching, paired prices, bookmaker consensus, dispersion,
+        # freshness, or push-probability safeguards inside _score_fixture.
         probability_floor = MIN_ESTIMATED_LEG_PROBABILITY
         candidates_before_probability_filter = len(all_candidates)
-        all_candidates = [x for x in all_candidates if float(x.get("probability", 0.0)) >= probability_floor]
+        strict_candidates = [x for x in all_candidates if x.get("passes_strict_filters")]
 
-        # Best displayed price for each distinct selection; keep the bookmaker alongside it.
-        best_by_selection = {}
-        for candidate in all_candidates:
-            key = (candidate["event_id"], candidate["market"], candidate["side"], candidate["line"])
-            previous = best_by_selection.get(key)
-            if previous is None or candidate["odds"] > previous["odds"]:
-                best_by_selection[key] = candidate
-        best_by_game = {}
-        for candidate in best_by_selection.values():
-            previous = best_by_game.get(candidate["event_id"])
-            if previous is None or (
-                candidate["probability"], candidate["edge_percentage_points"], candidate["score"]
-            ) > (previous["probability"], previous["edge_percentage_points"], previous["score"]):
-                best_by_game[candidate["event_id"]] = candidate
-        top_picks = sorted(
-            best_by_game.values(),
-            key=lambda x: (x["probability"], x["edge_percentage_points"], x["score"]),
-            reverse=True,
-        )[:12]
-
-        # A real single-bookmaker accumulator needs every leg at the same operator.
-        by_bookmaker: dict[str, list[dict]] = {}
-        for candidate in all_candidates:
-            by_bookmaker.setdefault(candidate["bookmaker"], []).append(candidate)
-        best_parlay = None
-        for bookmaker, items in by_bookmaker.items():
-            per_game = {}
-            for item in items:
-                old = per_game.get(item["event_id"])
-                if old is None or (
-                    item["probability"], item["edge_percentage_points"], item["score"]
-                ) > (old["probability"], old["edge_percentage_points"], old["score"]):
-                    per_game[item["event_id"]] = item
-            pool = sorted(
-                per_game.values(),
+        def _top_picks(source: list[dict]) -> list[dict]:
+            best_by_selection = {}
+            for candidate in source:
+                key = (candidate["event_id"], candidate["market"], candidate["side"], candidate["line"])
+                previous = best_by_selection.get(key)
+                if previous is None or candidate["odds"] > previous["odds"]:
+                    best_by_selection[key] = candidate
+            best_by_game = {}
+            for candidate in best_by_selection.values():
+                previous = best_by_game.get(candidate["event_id"])
+                if previous is None or (
+                    candidate["probability"], candidate["edge_percentage_points"], candidate["score"]
+                ) > (previous["probability"], previous["edge_percentage_points"], previous["score"]):
+                    best_by_game[candidate["event_id"]] = candidate
+            return sorted(
+                best_by_game.values(),
                 key=lambda x: (x["probability"], x["edge_percentage_points"], x["score"]),
                 reverse=True,
-            )[:18]
-            local_best = None
+            )[:12]
+
+        def _best_parlay(source: list[dict]) -> dict | None:
+            by_bookmaker: dict[str, list[dict]] = {}
+            for candidate in source:
+                by_bookmaker.setdefault(candidate["bookmaker"], []).append(candidate)
+            best = None
             target_min, target_max = _parlay_odds_band(target_odds)
-            for leg_count in range(1, min(8, len(pool)) + 1):
-                for combo in combinations(pool, leg_count):
-                    combined_odds = math.prod(x["odds"] for x in combo)
-                    if combined_odds < target_min - 1e-9 or combined_odds > target_max + 1e-9:
-                        continue
-                    hit_probability = math.prod(x["probability"] for x in combo)
-                    rank = _parlay_rank(hit_probability, combined_odds, target_odds, leg_count)
-                    if local_best is None or rank > local_best["rank"]:
-                        local_best = {
-                            "rank": rank,
-                            "bookmaker": bookmaker,
-                            "combined_odds": combined_odds,
-                            "target_odds": target_odds,
-                            "target_odds_min": target_min,
-                            "target_odds_max": target_max,
-                            "odds_deviation": combined_odds - target_odds,
-                            "odds_deviation_percent": ((combined_odds / target_odds) - 1.0) * 100.0,
-                            "estimated_hit_probability": hit_probability,
-                            "legs": list(combo),
-                        }
-            if local_best and (best_parlay is None or local_best["rank"] > best_parlay["rank"]):
-                best_parlay = local_best
+            for bookmaker, items in by_bookmaker.items():
+                per_game = {}
+                for item in items:
+                    old = per_game.get(item["event_id"])
+                    if old is None or (
+                        item["probability"], item["edge_percentage_points"], item["score"]
+                    ) > (old["probability"], old["edge_percentage_points"], old["score"]):
+                        per_game[item["event_id"]] = item
+                pool = sorted(
+                    per_game.values(),
+                    key=lambda x: (x["probability"], x["edge_percentage_points"], x["score"]),
+                    reverse=True,
+                )[:18]
+                local_best = None
+                for leg_count in range(1, min(8, len(pool)) + 1):
+                    for combo in combinations(pool, leg_count):
+                        combined_odds = math.prod(x["odds"] for x in combo)
+                        if combined_odds < target_min - 1e-9 or combined_odds > target_max + 1e-9:
+                            continue
+                        hit_probability = math.prod(x["probability"] for x in combo)
+                        rank = _parlay_rank(hit_probability, combined_odds, target_odds, leg_count)
+                        if local_best is None or rank > local_best["rank"]:
+                            local_best = {
+                                "rank": rank,
+                                "bookmaker": bookmaker,
+                                "combined_odds": combined_odds,
+                                "target_odds": target_odds,
+                                "target_odds_min": target_min,
+                                "target_odds_max": target_max,
+                                "odds_deviation": combined_odds - target_odds,
+                                "odds_deviation_percent": ((combined_odds / target_odds) - 1.0) * 100.0,
+                                "estimated_hit_probability": hit_probability,
+                                "legs": list(combo),
+                            }
+                if local_best and (best is None or local_best["rank"] > best["rank"]):
+                    best = local_best
+            return best
+
+        strict_best_parlay = _best_parlay(strict_candidates)
+        best_effort_fallback_attempted = bool(best_effort_requested and strict_best_parlay is None)
+        active_candidates = all_candidates if best_effort_fallback_attempted else strict_candidates
+        top_picks = _top_picks(active_candidates)
+        best_parlay = (
+            _best_parlay(active_candidates) if best_effort_fallback_attempted else strict_best_parlay
+        )
 
         if best_parlay:
             best_parlay.pop("rank", None)
-            best_parlay["status"] = "EXPLORATORY_NOT_VALIDATED"
+            best_parlay["status"] = (
+                "BEST_EFFORT_NOT_VALIDATED"
+                if best_effort_fallback_attempted else "EXPLORATORY_NOT_VALIDATED"
+            )
+            best_parlay["passes_strict_filters"] = all(
+                leg.get("passes_strict_filters", False) for leg in best_parlay["legs"]
+            )
         warnings = [
             "EXPLORATORY_NOT_VALIDATED: el modelo no tiene validación walk-forward/holdout aprobada; el 70% no está calibrado ni es una tasa de acierto demostrada.",
             ("El modelo simula prórrogas de forma aproximada para mercados que las incluyen; no equivale a una liquidación oficial exacta." if provider_name == "OddsPapi" else "El modelo base simula tiempo reglamentario; las cuotas FT de HoopsAPI incluyen prórroga. La comparación de probabilidades no es perfectamente equivalente."),
@@ -1748,6 +1795,27 @@ async def recommend_parlay(request: Request):
             "El historial usa una ventana móvil de hasta 400 días de la misma competición e incluye temporadas anteriores.",
             "Las cuotas de terceros pueden cambiar antes de apostar.",
         ]
+        if best_effort_fallback_attempted:
+            if best_parlay:
+                warnings.insert(
+                    0,
+                    "BEST_EFFORT_NOT_VALIDATED: no se encontró una combinada que cumpliera todos los filtros estrictos. "
+                    "Esta alternativa relaja solo los umbrales de probabilidad/EV; mantiene historial mínimo, "
+                    "competición y equipos coincidentes, 3 casas, dispersión máxima, cuotas recientes y control de push. "
+                    "No es una recomendación validada ni una tasa de acierto demostrada."
+                )
+            elif active_candidates:
+                warnings.insert(
+                    0,
+                    "BEST_EFFORT_NOT_VALIDATED: no hubo combinada estricta ni alternativa dentro de la banda de cuota. "
+                    "Se muestran picks exploratorios que no cumplen todos los filtros estrictos."
+                )
+            else:
+                warnings.insert(
+                    0,
+                    "No se encontró una alternativa de mejor esfuerzo. Los filtros de datos, historial, "
+                    "consenso, dispersión, frescura y coincidencia siguieron vigentes."
+                )
         excluded_competitions = sorted(
             label for label in imported_competition_labels
             if _normalise_competition(label) not in imported_competitions
@@ -1792,7 +1860,7 @@ async def recommend_parlay(request: Request):
         if total_in_window > 200:
             warnings.append("La ventana contiene más de 200 partidos; se procesan primero los partidos con historial compatible.")
         return {
-            "status": "EXPLORATORY_NOT_VALIDATED",
+            "status": "BEST_EFFORT_NOT_VALIDATED" if best_effort_fallback_attempted else "EXPLORATORY_NOT_VALIDATED",
             "window": {"start": start_time.isoformat(), "end": end_time.isoformat()},
             "target_odds": target_odds,
             "target_odds_band": {
@@ -1831,9 +1899,21 @@ async def recommend_parlay(request: Request):
             "skipped": skipped,
             "history_skip_examples": history_skip_examples,
             "team_name_skip_examples": team_name_skip_examples,
-            "eligible_market_selections": len(all_candidates),
+            "eligible_market_selections": len(strict_candidates),
+            "active_market_selections": len(active_candidates),
+            "relaxed_candidate_count": max(0, len(all_candidates) - len(strict_candidates)),
             "candidates_before_probability_filter": candidates_before_probability_filter,
             "minimum_estimated_leg_probability": probability_floor,
+            "best_effort": {
+                "requested": best_effort_requested,
+                "fallback_attempted": best_effort_fallback_attempted,
+                "fallback_found": bool(best_effort_fallback_attempted and best_parlay),
+                "minimum_raw_model_probability": BEST_EFFORT_MIN_RAW_MODEL_PROBABILITY,
+                "minimum_market_probability": BEST_EFFORT_MIN_MARKET_PROBABILITY,
+                "maximum_model_market_gap_pp": BEST_EFFORT_MAX_MODEL_MARKET_GAP * 100.0,
+                "minimum_estimated_leg_probability": BEST_EFFORT_MIN_ESTIMATED_LEG_PROBABILITY,
+                "minimum_expected_value": BEST_EFFORT_MIN_EXPECTED_VALUE,
+            },
             "minimum_history_games": minimum_history,
             "risk_controls": {
                 "minimum_raw_model_probability": MIN_RAW_MODEL_PROBABILITY,
@@ -1843,6 +1923,11 @@ async def recommend_parlay(request: Request):
                 "maximum_market_dispersion_pp": MAX_MARKET_DISPERSION * 100.0,
                 "maximum_quote_age_minutes": MAX_QUOTE_AGE_SECONDS / 60.0,
                 "uncertainty_haircut_pp": PROBABILITY_UNCERTAINTY_HAIRCUT * 100.0,
+                "best_effort_minimum_raw_model_probability": BEST_EFFORT_MIN_RAW_MODEL_PROBABILITY,
+                "best_effort_minimum_market_probability": BEST_EFFORT_MIN_MARKET_PROBABILITY,
+                "best_effort_maximum_model_market_gap_pp": BEST_EFFORT_MAX_MODEL_MARKET_GAP * 100.0,
+                "best_effort_minimum_estimated_leg_probability": BEST_EFFORT_MIN_ESTIMATED_LEG_PROBABILITY,
+                "best_effort_minimum_expected_value": BEST_EFFORT_MIN_EXPECTED_VALUE,
             },
             "top_picks": top_picks,
             "best_parlay": best_parlay,
