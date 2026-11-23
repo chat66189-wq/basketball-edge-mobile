@@ -2015,7 +2015,8 @@ def _run_backtest(all_games: list[dict], all_stats: list[dict], simulations: int
     per_competition: dict[str, list[dict]] = {}
     skipped: dict[str, int] = {}
     timed_out = False
-    for played, game in candidates:
+    # Newest first: if the time budget runs out, the oldest games are the ones dropped.
+    for played, game in reversed(candidates):
         if _time.monotonic() - started > time_budget_seconds:
             timed_out = True
             break
@@ -2118,7 +2119,7 @@ async def backtest(request: Request):
         only_eligible = bool(payload.get("only_eligible_leagues", True))
         result = await run_in_threadpool(
             _run_backtest, all_games, all_stats, simulations, minimum_history,
-            max_games, competition, 45.0, only_eligible,
+            max_games, competition, 85.0, only_eligible,
         )
         result["local_games_count"] = len(all_games)
         result["local_team_stats_count"] = len(all_stats)
