@@ -71,6 +71,22 @@ MAX_MARKET_DISPERSION = 0.04
 MAX_QUOTE_AGE_SECONDS = 15 * 60
 MIN_HISTORICAL_GAMES = 12
 PROBABILITY_UNCERTAINTY_HAIRCUT = 0.02
+PARLAY_ODDS_TOLERANCE_FRACTION = 0.05
+
+
+def _parlay_odds_band(target_odds: float) -> tuple[float, float]:
+    """Allow a narrow band around the requested combined price, not a minimum-only floor."""
+    return (
+        target_odds * (1.0 - PARLAY_ODDS_TOLERANCE_FRACTION),
+        target_odds * (1.0 + PARLAY_ODDS_TOLERANCE_FRACTION),
+    )
+
+
+def _parlay_rank(hit_probability: float, combined_odds: float,
+                 target_odds: float, leg_count: int) -> tuple[float, float, int]:
+    """Prefer the highest joint estimate, then the closest price to target."""
+    relative_distance = abs(combined_odds - target_odds) / target_odds
+    return (hit_probability, -relative_distance, -leg_count)
 
 
 def _simulate_game_for_settlement(projection, *, simulations: int, seed: int,
@@ -1350,19 +1366,24 @@ async def recommend_bookmaker_parlay(request: Request):
                     per_game[item["event_id"]] = item
             pool = sorted(per_game.values(), key=lambda item: item["score"], reverse=True)[:18]
             local_best = None
+            target_min, target_max = _parlay_odds_band(target_odds)
             for leg_count in range(1, min(8, len(pool)) + 1):
                 for combo in combinations(pool, leg_count):
                     combined_odds = math.prod(item["odds"] for item in combo)
-                    if combined_odds + 1e-9 < target_odds:
+                    if combined_odds < target_min - 1e-9 or combined_odds > target_max + 1e-9:
                         continue
                     hit_probability = math.prod(item["probability"] for item in combo)
-                    overshoot = combined_odds - target_odds
-                    rank = (hit_probability, -overshoot, -leg_count)
+                    rank = _parlay_rank(hit_probability, combined_odds, target_odds, leg_count)
                     if local_best is None or rank > local_best["rank"]:
                         local_best = {
                             "rank": rank,
                             "bookmaker": bookmaker,
                             "combined_odds": combined_odds,
+                            "target_odds": target_odds,
+                            "target_odds_min": target_min,
+                            "target_odds_max": target_max,
+                            "odds_deviation": combined_odds - target_odds,
+                            "odds_deviation_percent": ((combined_odds / target_odds) - 1.0) * 100.0,
                             "estimated_hit_probability": hit_probability,
                             "legs": list(combo),
                         }
@@ -1383,6 +1404,7 @@ async def recommend_bookmaker_parlay(request: Request):
             "Solo se evalúan ganador, hándicap, total del partido y totales por equipo; cada cotización requiere regla de liquidación confirmada. OT incluido se simula con prórrogas de cinco minutos hasta desempatar; esta extensión usa una aproximación no validada.",
             "No se usan mercados de jugadores, mitades, cuartos, margen, par/impar ni otros mercados no modelados por el motor actual.",
             "El motor no incorpora de forma fiable lesiones, titulares, minutos esperados, descanso ni viajes; se apoya principalmente en puntos y posesiones.",
+            "La combinada se busca dentro de una banda de +/-5% de la cuota objetivo; se admite quedar ligeramente por debajo o por encima, pero no fuera de ese rango.",
             "La probabilidad combinada multiplica las probabilidades de las piernas y supone independencia aproximada entre partidos.",
             "Las cuotas manuales deben haberse capturado en los últimos 15 minutos y pueden cambiar antes de apostar.",
             "El historial usa una ventana móvil de hasta 400 días de la misma competición; los cambios de plantel no están modelados.",
@@ -1416,6 +1438,12 @@ async def recommend_bookmaker_parlay(request: Request):
             "house": house,
             "window": {"start": start_time.isoformat(), "end": end_time.isoformat()},
             "target_odds": target_odds,
+            "target_odds_band": {
+                "minimum": _parlay_odds_band(target_odds)[0],
+                "target": target_odds,
+                "maximum": _parlay_odds_band(target_odds)[1],
+                "tolerance_percent": PARLAY_ODDS_TOLERANCE_FRACTION * 100.0,
+            },
             "matches_in_window": len(in_window),
             "matches_scanned": len(scan_items),
             "matches_analysed": analysed,
@@ -1617,19 +1645,24 @@ async def recommend_parlay(request: Request):
                     per_game[item["event_id"]] = item
             pool = sorted(per_game.values(), key=lambda x: x["score"], reverse=True)[:18]
             local_best = None
+            target_min, target_max = _parlay_odds_band(target_odds)
             for leg_count in range(1, min(8, len(pool)) + 1):
                 for combo in combinations(pool, leg_count):
                     combined_odds = math.prod(x["odds"] for x in combo)
-                    if combined_odds + 1e-9 < target_odds:
+                    if combined_odds < target_min - 1e-9 or combined_odds > target_max + 1e-9:
                         continue
                     hit_probability = math.prod(x["probability"] for x in combo)
-                    overshoot = combined_odds - target_odds
-                    rank = (hit_probability, -overshoot, -leg_count)
+                    rank = _parlay_rank(hit_probability, combined_odds, target_odds, leg_count)
                     if local_best is None or rank > local_best["rank"]:
                         local_best = {
                             "rank": rank,
                             "bookmaker": bookmaker,
                             "combined_odds": combined_odds,
+                            "target_odds": target_odds,
+                            "target_odds_min": target_min,
+                            "target_odds_max": target_max,
+                            "odds_deviation": combined_odds - target_odds,
+                            "odds_deviation_percent": ((combined_odds / target_odds) - 1.0) * 100.0,
                             "estimated_hit_probability": hit_probability,
                             "legs": list(combo),
                         }
@@ -1645,6 +1678,7 @@ async def recommend_parlay(request: Request):
             "Filtro reforzado: cada pierna debe superar 70% tras un descuento de incertidumbre de 2 puntos; exige simulación bruta >=72%, mercado sin margen >=60% y brecha modelo-mercado <=12 puntos porcentuales.",
             "El análisis automático exige precios emparejados de al menos 3 casas y dispersión máxima de 4 puntos porcentuales entre ellas.",
             "Se exigen al menos 12 partidos históricos completos por equipo y cuotas capturadas en los últimos 15 minutos.",
+            "La combinada se busca dentro de una banda de +/-5% de la cuota objetivo; puede quedar ligeramente por debajo o por encima, pero no fuera de ese rango.",
             "La probabilidad combinada multiplica las probabilidades de las piernas y supone independencia aproximada entre partidos; no estima correlaciones.",
             "El motor actual no incorpora de forma fiable lesiones, titulares confirmados, minutos esperados, descanso ni viajes; los cambios de plantel no están modelados.",
             "El motor se apoya principalmente en puntos y posesiones; todavía no aprovecha de forma completa tiro, rebotes, pérdidas ni métricas de jugadores.",
@@ -1689,6 +1723,12 @@ async def recommend_parlay(request: Request):
             "status": "EXPLORATORY_NOT_VALIDATED",
             "window": {"start": start_time.isoformat(), "end": end_time.isoformat()},
             "target_odds": target_odds,
+            "target_odds_band": {
+                "minimum": _parlay_odds_band(target_odds)[0],
+                "target": target_odds,
+                "maximum": _parlay_odds_band(target_odds)[1],
+                "tolerance_percent": PARLAY_ODDS_TOLERANCE_FRACTION * 100.0,
+            },
             "matches_in_window": total_in_window,
             "matches_scanned": len(scan_games),
             "matches_with_odds_loaded": len(in_window),

@@ -585,11 +585,12 @@ document.getElementById('build-bookmaker-parlay').addEventListener('click',async
   }
   if(data.best_parlay){
    body+='<hr style="border-color:var(--line);border-width:1px 0 0;margin:14px 0"><h3>Combinada propuesta · '+safe(house)+'</h3>'+
-    '<p><strong>Cuota combinada:</strong> '+Number(data.best_parlay.combined_odds).toFixed(2)+' · <strong>Probabilidad estimada:</strong> '+pct(data.best_parlay.estimated_hit_probability)+'</p>'+
+    '<p><strong>Cuota objetivo:</strong> '+Number(data.target_odds).toFixed(2)+' · Banda permitida ±'+Number(data.target_odds_band?.tolerance_percent||5).toFixed(0)+'% ('+Number(data.target_odds_band?.minimum||data.target_odds*0.95).toFixed(2)+'–'+Number(data.target_odds_band?.maximum||data.target_odds*1.05).toFixed(2)+')</p>'+
+     '<p><strong>Cuota combinada:</strong> '+Number(data.best_parlay.combined_odds).toFixed(2)+' · Desvío '+(Number(data.best_parlay.odds_deviation)>=0?'+':'')+Number(data.best_parlay.odds_deviation).toFixed(2)+' ('+(Number(data.best_parlay.odds_deviation_percent)>=0?'+':'')+Number(data.best_parlay.odds_deviation_percent).toFixed(1)+'%) · <strong>Probabilidad estimada:</strong> '+pct(data.best_parlay.estimated_hit_probability)+'</p>'+
     data.best_parlay.legs.map(c=>'<article class="record"><strong>'+safe(c.game)+'</strong><p>'+safe(c.competition)+' · '+safe(c.market_label)+' · '+safe(c.selection)+'</p><p>Cuota '+Number(c.odds).toFixed(2)+' · '+safe(c.bookmaker)+' · Probabilidad '+pct(c.probability)+'</p></article>').join('')+
     '<button class="action" type="button" data-save-combo="1">Guardar las piernas de la combinada</button>';
   }else{
-   body+='<p class="notice">No se pudo alcanzar la cuota objetivo con selecciones compatibles de esta casa.</p>';
+   body+='<p class="notice">No se encontró una combinada de esta casa dentro de la banda de ±5% de la cuota objetivo que mantenga todos los filtros de probabilidad.</p>';
   }
   body+='<h3>Advertencias del análisis</h3><ul>'+(data.warnings||[]).map(w=>'<li class="small">'+safe(w)+'</li>').join('')+'</ul></div>';
   parlayResult.innerHTML=body;
@@ -689,11 +690,12 @@ document.getElementById('build-parlay').addEventListener('click',async()=>{
   if(data.best_parlay){
    body+='<hr style="border-color:var(--line);border-width:1px 0 0;margin:14px 0"><h3>Combinada propuesta</h3>'+
     '<p><strong>Operador:</strong> '+safe(data.best_parlay.bookmaker)+'</p>'+
-    '<p><strong>Cuota combinada:</strong> '+Number(data.best_parlay.combined_odds).toFixed(2)+' · <strong>Probabilidad estimada:</strong> '+pct(data.best_parlay.estimated_hit_probability)+'</p>'+
+    '<p><strong>Cuota objetivo:</strong> '+Number(data.target_odds).toFixed(2)+' · Banda permitida ±'+Number(data.target_odds_band?.tolerance_percent||5).toFixed(0)+'% ('+Number(data.target_odds_band?.minimum||data.target_odds*0.95).toFixed(2)+'–'+Number(data.target_odds_band?.maximum||data.target_odds*1.05).toFixed(2)+')</p>'+
+     '<p><strong>Cuota combinada:</strong> '+Number(data.best_parlay.combined_odds).toFixed(2)+' · Desvío '+(Number(data.best_parlay.odds_deviation)>=0?'+':'')+Number(data.best_parlay.odds_deviation).toFixed(2)+' ('+(Number(data.best_parlay.odds_deviation_percent)>=0?'+':'')+Number(data.best_parlay.odds_deviation_percent).toFixed(1)+'%) · <strong>Probabilidad estimada:</strong> '+pct(data.best_parlay.estimated_hit_probability)+'</p>'+
     data.best_parlay.legs.map((c,i)=>'<article class="record"><strong>'+safe(c.game)+'</strong><p>'+safe(c.competition)+' · '+safe(c.market_label)+' · '+safe(c.selection)+'</p><p>Cuota '+Number(c.odds).toFixed(2)+' · '+safe(c.bookmaker)+' · Probabilidad '+pct(c.probability)+'</p></article>').join('')+
     '<button class="action" type="button" data-save-combo="1">Guardar las piernas de la combinada</button>';
   }else{
-   body+='<p class="notice">No se pudo alcanzar la cuota objetivo con selecciones que superaran el filtro de valor y estuvieran disponibles en un mismo operador.</p>';
+   body+='<p class="notice">No se encontró una combinada dentro de la banda de ±5% de la cuota objetivo que mantenga todos los filtros de probabilidad y esté disponible en un mismo operador.</p>';
   }
   body+='<h3>Advertencias del análisis</h3><ul>'+(data.warnings||[]).map(w=>'<li class="small">'+safe(w)+'</li>').join('')+'</ul></div>';
   parlayResult.innerHTML=body;
