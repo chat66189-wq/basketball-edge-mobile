@@ -53,6 +53,23 @@ def _normalise(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", str(value or "").casefold())
 
 
+def _competition_key(value: str) -> str:
+    label = _normalise(value)
+    if not label:
+        return ""
+    if "wnba" in label or "womensnationalbasketballassociation" in label:
+        return "wnba"
+    if label in {"nbl", "nationalbasketballleague", "australiannationalbasketballleague"}:
+        return "nbl"
+    if "nbagleague" in label or label == "nbadevelopment":
+        return "nbagleague"
+    if "ncaa" in label:
+        return "ncaadivision1women" if ("women" in label or "female" in label or label.endswith(("ncaaw", "ncaadiw", "ncaad1w"))) else "ncaadivision1men"
+    if label.startswith("nba") or label == "nationalbasketballassociation":
+        return "nba"
+    return label
+
+
 def _get_json(path: str, params: dict | None = None, ttl: int = 3600) -> dict:
     query = urlencode({k: v for k, v in (params or {}).items() if v not in (None, "")})
     url = BASE + "/" + path.lstrip("/") + ("?" + query if query else "")
@@ -302,26 +319,10 @@ def sync(competitions: str, days: int = 400, max_games_per_league: int = 180) ->
         raise ESPNError("El máximo por competición debe estar entre 1 y 240 partidos.", 422)
 
     labels = [x.strip() for x in re.split(r"[,;|]", str(competitions or "")) if x.strip()]
-    requested_keys = {_normalise(x) for x in labels}
-    selected = []
-    unsupported = []
-    for key, spec in LEAGUES.items():
-        aliases = {key, _normalise(spec["competition"]), _normalise(spec["slug"])}
-        aliases |= {
-            "ncaam": "ncaadivision1men",
-            "ncaaw": "ncaadivision1women",
-            "nbagleague": "nbagleague",
-        }.get(key, key) and set()
-        if requested_keys & aliases:
-            selected.append((key, spec))
-    recognized = {_normalise(spec["competition"]) for _, spec in selected}
-    for label in labels:
-        if _normalise(label) not in recognized and _normalise(label) not in {
-            _normalise("NBA G League Tip-Off Tournament"),
-            _normalise("NCAA, Regular Season"),
-            _normalise("NCAA Women, Regular Season"),
-        }:
-            unsupported.append(label)
+    requested_keys = {_competition_key(x) for x in labels}
+    selected = [(key, spec) for key, spec in LEAGUES.items() if key in requested_keys]
+    recognized = {key for key, _ in selected}
+    unsupported = [label for label in labels if _competition_key(label) not in recognized]
     if not selected:
         return {
             "provider": "ESPN public JSON",
@@ -346,26 +347,30 @@ def sync(competitions: str, days: int = 400, max_games_per_league: int = 180) ->
     failed_summaries = 0
     for key, spec in selected:
         event_index = {}
-        for month in months:
+        def fetch_month(month):
             params = {"dates": month, "limit": 1000}
             if spec.get("groups"):
                 params["groups"] = spec["groups"]
-            try:
-                scoreboard = _get_json(spec["slug"] + "/scoreboard", params, ttl=6 * 3600)
-            except ESPNError as exc:
-                if exc.status == 404:
+            return _get_json(spec["slug"] + "/scoreboard", params, ttl=6 * 3600)
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            month_futures = {executor.submit(fetch_month, month): month for month in months}
+            for future in as_completed(month_futures):
+                try:
+                    scoreboard = future.result()
+                except ESPNError as exc:
+                    if exc.status == 404:
+                        continue
+                    raise
+                events = scoreboard.get("events") or []
+                if not isinstance(events, list):
                     continue
-                raise
-            events = scoreboard.get("events") or []
-            if not isinstance(events, list):
-                continue
-            for raw_event in events:
-                event = _event_from_scoreboard(raw_event, spec)
-                if event is None:
-                    continue
-                played = _parse_datetime(event["event_time"])
-                if played and start_day <= played.date() <= end_day:
-                    event_index[event["espn_id"]] = event
+                for raw_event in events:
+                    event = _event_from_scoreboard(raw_event, spec)
+                    if event is None:
+                        continue
+                    played = _parse_datetime(event["event_time"])
+                    if played and start_day <= played.date() <= end_day:
+                        event_index[event["espn_id"]] = event
         ordered = sorted(event_index.values(), key=lambda item: item["event_time"], reverse=True)
         total_events_seen += len(ordered)
         chosen = ordered[:max_games_per_league]
