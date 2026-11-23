@@ -1,0 +1,47 @@
+from pathlib import Path
+import unittest
+
+
+ROOT = Path(__file__).resolve().parents[1]
+APP = (ROOT / "app.py").read_text(encoding="utf-8")
+HTML = (ROOT / "index.html").read_text(encoding="utf-8")
+SERVICE_WORKER = (ROOT / "sw.js").read_text(encoding="utf-8")
+
+
+class StrictParlayPolicyTests(unittest.TestCase):
+    def test_automatic_parlays_cannot_enable_best_effort(self):
+        self.assertIn("best_effort_requested = False", APP)
+        self.assertNotIn('id="best-effort-mode"', HTML)
+        self.assertIn("best_effort:false", HTML)
+
+    def test_each_leg_keeps_seventy_percent_conservative_minimum(self):
+        self.assertIn("MIN_ESTIMATED_LEG_PROBABILITY = 0.70", APP)
+        self.assertIn("MIN_RAW_MODEL_PROBABILITY = 0.72", APP)
+        self.assertIn('"conservative_probability_below_70pct"', APP)
+
+    def test_two_bookmaker_paired_consensus_is_required(self):
+        self.assertIn("MIN_AUTOMATIC_BOOKMAKER_CONSENSUS = 2", APP)
+        self.assertIn('reject("fewer_than_2_bookmakers")', APP)
+        self.assertIn("MAX_MARKET_DISPERSION = 0.04", APP)
+
+    def test_consensus_breakdown_is_reported(self):
+        self.assertIn("bookmaker_groups_1_house", APP)
+        self.assertIn("bookmaker_groups_2_houses", APP)
+        self.assertIn("bookmaker_groups_3plus_houses", APP)
+        self.assertIn("fewer_than_2_bookmakers", HTML)
+
+    def test_app_attempts_history_for_missing_leagues_even_when_some_games_match(self):
+        self.assertIn("const hasMissingFixtureHistory=fixtureLabelsForTopUp.some", HTML)
+        self.assertIn("if(data.provider==='OddsPapi'&&hasMissingFixtureHistory)", HTML)
+        self.assertNotIn(
+            "data.matches_matching_imported_competitions||0)===0",
+            HTML,
+        )
+
+    def test_service_worker_refreshes_navigation_and_invalidates_prior_cache(self):
+        self.assertIn("basketball-edge-v32-strict70-two-bookmakers", SERVICE_WORKER)
+        self.assertIn("event.request.mode==='navigate'", SERVICE_WORKER)
+
+
+if __name__ == "__main__":
+    unittest.main()
