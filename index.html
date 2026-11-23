@@ -729,30 +729,38 @@ async function autoTopUpHistoryForFixtures(analysis){
  }))];
  const supportedKeys=new Set(['nba','nbagleague','nbl','wnba','ncaadivision1men','ncaadivision1women']);
  const now=Date.now();
+ const audit=analysis.competition_history_audit||{};
  const eligible=missing.filter(label=>{
   const key=autoCompetitionKey(label);
   if(!supportedKeys.has(key))return false;
   const last=Number(localStorage.getItem('bea-v20-espn-history:'+key)||0);
   return !last||now-last>12*60*60*1000;
+ }).sort((a,b)=>{
+  const ah=Number(audit[autoCompetitionKey(a)]?.estimated_games_to_import||999999);
+  const bh=Number(audit[autoCompetitionKey(b)]?.estimated_games_to_import||999999);
+  return ah-bh||a.localeCompare(b);
  });
  const unsupported=missing.filter(label=>!supportedKeys.has(autoCompetitionKey(label)));
- if(!eligible.length){
+ const selectedEligible=eligible.slice(0,2);
+ if(!selectedEligible.length){
   return {teamStatsRows:0,summary:'No se consultó SportAPI.ai. '+(unsupported.length?'ESPN no tiene un mapeo público implementado para: '+unsupported.join(', ')+'. ':'')+'Las competiciones compatibles ya se consultaron recientemente o no tienen cobertura ESPN.'};
  }
  message.textContent='Completando historial sin SportAPI.ai · ESPN público · '+eligible.join(', ')+'. Solo se guardarán box scores completos.';
- const query=new URLSearchParams({competitions:eligible.join(','),days:'400',max_games_per_league:'220'});
+ const query=new URLSearchParams({competitions:selectedEligible.join(','),days:'400',max_games_per_league:'220'});
  const data=await providerRequest('/api/espn/history-sync?'+query);
  const merged=await persistEspnHistoryWithoutDuplicates(data);
  if(merged.statsAdded>0){
-  for(const label of eligible){
+  for(const label of selectedEligible){
    const key=autoCompetitionKey(label);
    if(key)localStorage.setItem('bea-v20-espn-history:'+key,String(now));
   }
  }
  const warnings=(data.warnings||[]).join(' ');
+ const deferred=eligible.slice(2);
  let summary='Actualización automática sin SportAPI.ai: ESPN consultó '+(data.competitions_supported||[]).join(', ')+
   ' · partidos nuevos '+merged.gamesAdded+' · duplicados reconciliados '+merged.duplicateGames+
   ' · registros nuevos de equipo '+merged.statsAdded+'.';
+ if(deferred.length)summary+=' Otras ligas compatibles pendientes para próximas búsquedas: '+deferred.join(', ')+'.';
  if(unsupported.length)summary+=' Sin cobertura ESPN: '+unsupported.join(', ')+'.';
  if(warnings)summary+=' '+warnings;
  return {teamStatsRows:merged.statsAdded,summary};
