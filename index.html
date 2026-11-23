@@ -654,7 +654,7 @@ function autoCompetitionKey(value){
  }
  if(['nba','nbamen','nationalbasketballassociation','nationalbasketballassociationmen'].includes(label))return 'nba';
  if(label.startsWith('nba')&&!['nbagleague','nbawomen','nbasummer','nbacalifornia','nbautah','nbasaltlake','nbapreseason'].some(prefix=>label.startsWith(prefix))&&!label.includes('summerleague')&&!label.includes('classic'))return 'nba';
- if(['nbl','nblmen','nationalbasketballleague','nationalbasketballleaguemen','australiannbl','australiannationalbasketballleague'].includes(label))return 'nbl';
+ if(['nbl','nblmen','nationalbasketballleague','nationalbasketballleaguemen','australianbl','australiannationalbasketballleague','nationalbasketballleagueaustralia'].includes(label))return 'nbl';
  for(let i=0;i<3;i++){
   const before=label;
   for(const suffix of ['boxscores','boxscore','basketball','statistics','stats']){
