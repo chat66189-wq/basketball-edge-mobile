@@ -280,15 +280,24 @@ def account_status() -> dict:
 
 
 def _parse_label(raw: str) -> tuple[str, float | None] | None:
-    value = str(raw or "").strip().lower().replace(",", ".")
-    if value in {"home", "1", "participant1", "team1"}:
-        return "home", None
-    if value in {"away", "2", "participant2", "team2"}:
-        return "away", None
-    if value in {"over", "o"}:
-        return "over", None
-    if value in {"under", "u"}:
-        return "under", None
+    value = re.sub(r"\s+", " ", str(raw or "").strip().lower().replace(",", "."))
+    simple = {
+        "home": ("home", None), "1": ("home", None),
+        "participant1": ("home", None), "participant 1": ("home", None),
+        "team1": ("home", None), "team 1": ("home", None),
+        "home team": ("home", None),
+        "away": ("away", None), "2": ("away", None),
+        "participant2": ("away", None), "participant 2": ("away", None),
+        "team2": ("away", None), "team 2": ("away", None),
+        "away team": ("away", None),
+        "over": ("over", None), "o": ("over", None),
+        "under": ("under", None), "u": ("under", None),
+    }
+    if value in simple:
+        return simple[value]
+    match = re.match(r"^(over|under)\s*([+-]?\d+(?:\.\d+)?)$", value)
+    if match:
+        return match.group(1), float(match.group(2))
     match = re.match(r"^([+-]?\d+(?:\.\d+)?)\s*/\s*(home|away|1|2|over|under)$", value)
     if match:
         number = float(match.group(1))
@@ -298,7 +307,6 @@ def _parse_label(raw: str) -> tuple[str, float | None] | None:
     if match:
         return match.group(1), float(match.group(2))
     return None
-
 
 def _is_full_game_period(value: str) -> bool:
     period = re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
@@ -338,18 +346,41 @@ def _market_family(name: str) -> str | None:
     return None
 
 
-def _market_metadata() -> dict[str, str]:
+def _market_metadata() -> dict[str, dict]:
+    """Read market family, line and canonical outcome names from OddsPapi's catalogue."""
     data = _get("markets", {"language": "en"}, ttl=86400)
     if not isinstance(data, list):
         raise OddsPapiError("El catálogo de mercados de OddsPapi tiene un formato inesperado.")
-    return {
-        str(row.get("marketId")): family
-        for row in data if isinstance(row, dict)
-        if int(row.get("sportId") or 0) == SPORT_ID_BASKETBALL
-        and (family := _market_family(row.get("marketName"))) is not None
-        and _is_full_game_period(str(row.get("period") or ""))
-    }
-
+    result: dict[str, dict] = {}
+    for row in data:
+        if not isinstance(row, dict) or int(row.get("sportId") or 0) != SPORT_ID_BASKETBALL:
+            continue
+        family = _market_family(row.get("marketName"))
+        if not family or not _is_full_game_period(str(row.get("period") or "")):
+            continue
+        raw_handicap = row.get("handicap")
+        try:
+            handicap = float(raw_handicap) if raw_handicap not in (None, "") else None
+        except (TypeError, ValueError):
+            handicap = None
+        outcomes: dict[str, str] = {}
+        raw_outcomes = row.get("outcomes") or []
+        if isinstance(raw_outcomes, list):
+            for outcome in raw_outcomes:
+                if isinstance(outcome, dict) and outcome.get("outcomeId") is not None:
+                    outcomes[str(outcome["outcomeId"])] = str(outcome.get("outcomeName") or "")
+        elif isinstance(raw_outcomes, dict):
+            for outcome_id, outcome in raw_outcomes.items():
+                if isinstance(outcome, dict):
+                    outcomes[str(outcome_id)] = str(outcome.get("outcomeName") or "")
+                elif outcome is not None:
+                    outcomes[str(outcome_id)] = str(outcome)
+        result[str(row.get("marketId"))] = {
+            "family": family,
+            "handicap": handicap,
+            "outcomes": outcomes,
+        }
+    return result
 
 def _select_bookmakers(available_bookmakers: list[str]) -> list[str]:
     """Choose a small, deterministic set of subscribed sportsbook slugs."""
@@ -393,51 +424,96 @@ def _fresh_timestamp(value: str | None, now: datetime) -> bool:
         return False
 
 
-def _normalise_odds_fixture(fixture: dict, odds: dict, market_families: dict[str, str], now: datetime) -> dict:
+def _normalise_odds_fixture(fixture: dict, odds: dict, market_families: dict[str, dict], now: datetime) -> dict:
+    """Normalize active paired bookmaker prices using market-catalogue metadata."""
     home = str(fixture.get("participant1Name") or "").strip()
     away = str(fixture.get("participant2Name") or "").strip()
     groups: dict[tuple, dict[str, dict]] = {}
     boards = (odds or {}).get("bookmakerOdds") or {}
+    audit = {
+        "bookmaker_boards": len(boards) if isinstance(boards, dict) else 0,
+        "active_bookmaker_boards": 0,
+        "recognized_market_instances": 0,
+        "active_prices": 0,
+        "fresh_prices": 0,
+        "parsed_outcomes": 0,
+        "unparsed_outcomes": 0,
+        "stale_prices": 0,
+        "incomplete_bookmaker_market_pairs": 0,
+        "paired_quotes": 0,
+        "normalized_market_groups": 0,
+    }
+    if not isinstance(boards, dict):
+        boards = {}
     for bookmaker, board in boards.items():
         if not isinstance(board, dict) or not board.get("bookmakerIsActive", True) or board.get("suspended"):
             continue
+        audit["active_bookmaker_boards"] += 1
         markets = board.get("markets") or {}
+        if not isinstance(markets, dict):
+            continue
         for market_id, market in markets.items():
-            family = market_families.get(str(market_id))
-            if not family or not isinstance(market, dict) or not market.get("marketActive", True):
+            metadata = market_families.get(str(market_id))
+            if not metadata or not isinstance(market, dict):
                 continue
+            family = metadata.get("family")
+            if family not in {"moneyline", "spread", "total"} or not market.get("marketActive", True):
+                continue
+            audit["recognized_market_instances"] += 1
             for outcome_id, outcome in (market.get("outcomes") or {}).items():
-                players = (outcome or {}).get("players") or {}
-                player = players.get("0")
+                if not isinstance(outcome, dict):
+                    continue
+                players = outcome.get("players") or {}
+                player = players.get("0") if isinstance(players, dict) else None
                 if not isinstance(player, dict) or not player.get("active", True):
                     continue
-                price = player.get("price")
                 try:
-                    price = float(price)
+                    price = float(player.get("price"))
                 except (TypeError, ValueError):
                     continue
                 if not (1.0001 < price < 1000):
                     continue
+                audit["active_prices"] += 1
                 changed = player.get("changedAt") or player.get("bookmakerChangedAt") or (odds or {}).get("updatedAt")
                 if not _fresh_timestamp(changed, now):
+                    audit["stale_prices"] += 1
                     continue
+                audit["fresh_prices"] += 1
+
+                # Prefer the bookmaker label; fall back to canonical outcomeName
+                # from /markets when a feed uses numeric or provider-specific IDs.
                 parsed = _parse_label(player.get("bookmakerOutcomeId"))
-                if parsed is None:
+                allowed_sides = {"home", "away"} if family in {"moneyline", "spread"} else {"over", "under"}
+                if parsed is None or parsed[0] not in allowed_sides:
+                    catalogue_label = (metadata.get("outcomes") or {}).get(str(outcome_id))
+                    parsed = _parse_label(catalogue_label)
+                if parsed is None or parsed[0] not in allowed_sides:
+                    audit["unparsed_outcomes"] += 1
                     continue
                 side, raw_line = parsed
+                audit["parsed_outcomes"] += 1
+
                 if family == "moneyline":
-                    if side not in {"home", "away"}:
-                        continue
                     line = None
                 elif family == "total":
-                    if side not in {"over", "under"} or raw_line is None:
+                    # Basketball totals are catalogued as one market ID per line.
+                    line_value = raw_line if raw_line is not None else metadata.get("handicap")
+                    if line_value is None:
+                        audit["unparsed_outcomes"] += 1
                         continue
-                    line = round(raw_line, 2)
+                    line = round(float(line_value), 2)
                 else:
-                    if side not in {"home", "away"} or raw_line is None:
+                    # Catalogue handicap is the home-team line. If the bookmaker
+                    # embeds a side-specific line in its label, normalize it first.
+                    if raw_line is not None:
+                        line_value = raw_line if side == "home" else -raw_line
+                    else:
+                        line_value = metadata.get("handicap")
+                    if line_value is None:
+                        audit["unparsed_outcomes"] += 1
                         continue
-                    # Normalize every handicap to the home-team line.
-                    line = round(raw_line if side == "home" else -raw_line, 2)
+                    line = round(float(line_value), 2)
+
                 key = (family, line)
                 groups.setdefault(key, {}).setdefault(str(bookmaker), {})[side] = {
                     "price": price, "captured_at": changed
@@ -449,11 +525,17 @@ def _normalise_odds_fixture(fixture: dict, odds: dict, market_families: dict[str
         for bookmaker, sides in by_book.items():
             required = ("home", "away") if family in {"moneyline", "spread"} else ("over", "under")
             if not all(side in sides for side in required):
+                audit["incomplete_bookmaker_market_pairs"] += 1
                 continue
             captured = min(sides[x]["captured_at"] for x in required)
             entry = {"line": line, required[0]: sides[required[0]]["price"],
                      required[1]: sides[required[1]]["price"], "captured_at": captured}
             ft.setdefault(bookmaker, {}).setdefault(api_name, []).append(entry)
+            audit["paired_quotes"] += 1
+
+    audit["normalized_market_groups"] = sum(
+        len(rows) for markets in ft.values() for rows in markets.values()
+    )
     periods: dict[str, dict] = {"ft": ft}
     providers: dict[str, dict] = {
         bookmaker: {"captured_at": max(
@@ -472,10 +554,10 @@ def _normalise_odds_fixture(fixture: dict, odds: dict, market_families: dict[str
         "updated_at": fixture.get("updatedAt"),
         "periods": periods,
         "providers": providers,
+        "odds_audit": audit,
         "oddspapi_fixture_id": fixture.get("fixtureId"),
         "settlement_scope": "includes_overtime",
     }
-
 
 def _competition_key(value: str) -> str:
     """Canonicalize exact league identity without merging genders or NCAA divisions."""
@@ -646,10 +728,24 @@ def games(
             "bookmakers_limit": MAX_BOOKMAKERS_PER_FIXTURE,
             "scan_cap": MAX_ODDS_FIXTURES_PER_RUN,
             "markets_catalog_loaded": False,
+            "odds_data_audit": {
+                "bookmaker_boards": 0, "active_bookmaker_boards": 0,
+                "recognized_market_instances": 0, "active_prices": 0,
+                "fresh_prices": 0, "parsed_outcomes": 0, "unparsed_outcomes": 0,
+                "stale_prices": 0, "incomplete_bookmaker_market_pairs": 0,
+                "paired_quotes": 0, "normalized_market_groups": 0,
+            },
         }
 
     market_families = _market_metadata()
     normalized = []
+    audit_fields = (
+        "bookmaker_boards", "active_bookmaker_boards", "recognized_market_instances",
+        "active_prices", "fresh_prices", "parsed_outcomes", "unparsed_outcomes",
+        "stale_prices", "incomplete_bookmaker_market_pairs", "paired_quotes",
+        "normalized_market_groups",
+    )
+    odds_data_audit = {key: 0 for key in audit_fields}
     for fixture in selected:
         # Never cache the raw /odds payload: normalize one fixture at a time.
         odds = _get(
@@ -663,7 +759,10 @@ def games(
             ttl=0,
         )
         if isinstance(odds, dict):
-            normalized.append(_normalise_odds_fixture(fixture, odds, market_families, now))
+            normalized_fixture = _normalise_odds_fixture(fixture, odds, market_families, now)
+            normalized.append(normalized_fixture)
+            for key in audit_fields:
+                odds_data_audit[key] += int((normalized_fixture.get("odds_audit") or {}).get(key) or 0)
         del odds
         time.sleep(0.55)
 
@@ -685,4 +784,5 @@ def games(
         "bookmakers_limit": MAX_BOOKMAKERS_PER_FIXTURE,
         "scan_cap": MAX_ODDS_FIXTURES_PER_RUN,
         "markets_catalog_loaded": True,
+        "odds_data_audit": odds_data_audit,
     }
