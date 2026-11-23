@@ -677,7 +677,7 @@ def _competition_key(value: str) -> str:
         return ""
     if "wnba" in compact or "womensnationalbasketballassociation" in compact:
         return "wnba"
-    if compact in {"nbl", "nblmen", "nationalbasketballleague", "nationalbasketballleaguemen", "australiannbl", "australiannationalbasketballleague"}:
+    if compact in {"nbl", "nblmen", "nationalbasketballleague", "nationalbasketballleaguemen", "australianbl", "australiannationalbasketballleague", "nationalbasketballleagueaustralia"}:
         return "nbl"
     if "euroleague" in compact:
         return "euroleague" + ("women" if "women" in compact or "female" in compact else "")
