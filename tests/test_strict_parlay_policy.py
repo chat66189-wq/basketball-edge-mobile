@@ -25,6 +25,17 @@ class StrictParlayPolicyTests(unittest.TestCase):
         self.assertIn('reject("fewer_than_2_bookmakers")', APP)
         self.assertIn("MAX_MARKET_DISPERSION = 0.04", APP)
 
+    def test_uncertainty_haircut_is_dynamic_but_capped(self):
+        self.assertIn("PROBABILITY_UNCERTAINTY_HAIRCUT = 0.02", APP)
+        self.assertIn("MAX_DYNAMIC_UNCERTAINTY_ADJUSTMENT = 0.005", APP)
+        self.assertIn("effective_haircut, haircut_adjustments = _uncertainty_haircut(", APP)
+        self.assertIn('"probability_uncertainty_adjustments_pp"', APP)
+
+    def test_joint_parlay_estimate_has_a_thirty_percent_floor(self):
+        self.assertIn("MIN_PARLAY_JOINT_PROBABILITY = 0.30", APP)
+        self.assertIn("if hit_probability < MIN_PARLAY_JOINT_PROBABILITY:", APP)
+        self.assertIn('"minimum_joint_probability": MIN_PARLAY_JOINT_PROBABILITY', APP)
+
     def test_consensus_breakdown_is_reported(self):
         self.assertIn("bookmaker_groups_1_house", APP)
         self.assertIn("bookmaker_groups_2_houses", APP)
@@ -34,10 +45,7 @@ class StrictParlayPolicyTests(unittest.TestCase):
     def test_app_attempts_history_for_missing_leagues_even_when_some_games_match(self):
         self.assertIn("const hasMissingFixtureHistory=fixtureLabelsForTopUp.some", HTML)
         self.assertIn("if(data.provider==='OddsPapi'&&hasMissingFixtureHistory)", HTML)
-        self.assertNotIn(
-            "data.matches_matching_imported_competitions||0)===0",
-            HTML,
-        )
+        self.assertNotIn("data.matches_matching_imported_competitions||0)===0", HTML)
 
     def test_ncaam_and_g_league_fixture_aliases_are_normalized_consistently(self):
         self.assertIn(') else "men"', APP)
@@ -48,7 +56,7 @@ class StrictParlayPolicyTests(unittest.TestCase):
         self.assertIn("if(label.startsWith('nbagleague'))return 'nbagleague'", HTML)
 
     def test_service_worker_refreshes_navigation_and_invalidates_prior_cache(self):
-        self.assertIn("basketball-edge-v33-history-priority-fresh-quota", SERVICE_WORKER)
+        self.assertIn("basketball-edge-v34-espn-free-history-conservative", SERVICE_WORKER)
         self.assertIn("event.request.mode==='navigate'", SERVICE_WORKER)
 
 

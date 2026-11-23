@@ -4,7 +4,6 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 HTML = (ROOT / "index.html").read_text(encoding="utf-8")
-SPORTAPI = (ROOT / "sportapi_provider.py").read_text(encoding="utf-8")
 
 
 class ParlayAutomaticHistoryTests(unittest.TestCase):
@@ -12,28 +11,25 @@ class ParlayAutomaticHistoryTests(unittest.TestCase):
         self.assertNotIn('id="best-effort-mode"', HTML)
         self.assertIn("best_effort:false", HTML)
 
-    def test_auto_history_runs_when_any_fixture_league_lacks_history(self):
-        self.assertIn("const hasMissingFixtureHistory=fixtureLabelsForTopUp.some", HTML)
-        self.assertIn("data.provider==='OddsPapi'&&hasMissingFixtureHistory", HTML)
+    def test_missing_history_uses_espn_not_sportapi_automatically(self):
         self.assertIn("autoTopUpHistoryForFixtures(data)", HTML)
-        self.assertIn("data.fixture_competitions_in_window", HTML)
+        self.assertIn("/api/espn/history-sync?", HTML)
+        self.assertIn("providerRequest('/api/espn/history-sync?", HTML)
+        auto_function = HTML.split("async function autoTopUpHistoryForFixtures(analysis){", 1)[1].split(
+            "const sportApiFixturesMessage=", 1
+        )[0]
+        self.assertNotIn("sportApiRequest(", auto_function)
+        self.assertNotIn("/api/sportapi/", auto_function)
+        self.assertIn("No se consultó SportAPI.ai", auto_function)
 
-    def test_sportapi_status_reads_fresh_quota_headers(self):
-        self.assertIn('def status():\n    # The league catalogue may be cached, but quota headers must always be fresh.\n    data=_get("basketball/leagues",ttl=0)', SPORTAPI)
+    def test_automatic_espn_merge_deduplicates_games_and_stats(self):
+        self.assertIn("persistEspnHistoryWithoutDuplicates", HTML)
+        self.assertIn("gameSignature", HTML)
+        self.assertIn("existingStatKeys", HTML)
+        self.assertIn("bea-v20-espn-history:", HTML)
 
-    def test_auto_history_prioritizes_the_league_with_the_smallest_history_gap(self):
-        self.assertIn("const aCost=a.estimated>0?a.estimated:Number.MAX_SAFE_INTEGER", HTML)
-        self.assertIn("return aCost-bCost||b.maxTeamGames-a.maxTeamGames", HTML)
-        self.assertNotIn("key==='nba'?0", HTML)
-
-    def test_auto_history_does_not_use_a_fixed_six_hour_lock(self):
-        self.assertNotIn("now-lastAttempt<6*60*60*1000", HTML)
-        self.assertIn("sportApiRemaining(status.quota)", HTML)
-        self.assertIn("SportAPI.ai tiene '+remaining+' solicitudes disponibles", HTML)
-
-    def test_auto_history_uses_sportapi_box_scores_and_retries_analysis(self):
-        self.assertIn("item.box_scores!==false", HTML)
-        self.assertIn("include_players:'false'", HTML)
+    def test_automatic_search_retries_after_new_team_boxscores(self):
+        self.assertIn("if(updated.teamStatsRows>0)", HTML)
         self.assertIn("data=await requestRecommendation(games,teamStats)", HTML)
         self.assertIn("minimum_history_games:12", HTML)
 
