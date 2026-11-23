@@ -581,7 +581,10 @@ def _normalise_competition(value: Any) -> str:
     # NBA provider labels may include "men", "basketball", or country descriptors.
     if label in {"nba", "nbamen", "nationalbasketballassociation", "nationalbasketballassociationmen"}:
         return "nba"
-    if label.startswith("nba") and not label.startswith(("nbagleague", "nbawomen")):
+    # Summer League and exhibition events are not NBA regular-season history.
+    if label.startswith("nba") and not label.startswith(
+        ("nbagleague", "nbawomen", "nbasummer", "nbacalifornia", "nbautah", "nbasaltlake", "nbapreseason")
+    ) and "summerleague" not in label and "classic" not in label:
         return "nba"
 
     # Remove display-only suffixes, then the gender marker. Division and league
