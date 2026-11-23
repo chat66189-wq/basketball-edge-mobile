@@ -854,6 +854,9 @@ def games(
         }
 
     market_families = _market_metadata()
+    # Reuse the cached /markets catalogue fetched above; this does not make
+    # an additional provider request when the cache is warm.
+    catalogue_audit = market_catalogue_audit()
     normalized = []
     audit_fields = (
         "bookmaker_boards", "active_bookmaker_boards", "recognized_market_instances",
@@ -904,5 +907,6 @@ def games(
         "bookmakers_limit": MAX_BOOKMAKERS_PER_FIXTURE,
         "scan_cap": MAX_ODDS_FIXTURES_PER_RUN,
         "markets_catalog_loaded": True,
+        "market_catalogue_audit": catalogue_audit,
         "odds_data_audit": odds_data_audit,
     }
