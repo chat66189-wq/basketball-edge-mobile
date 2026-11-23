@@ -198,6 +198,7 @@ let bookmakerFixtureCache=[];
 function openDB(){return new Promise((resolve,reject)=>{const req=indexedDB.open(DB_NAME,DB_VERSION);req.onupgradeneeded=()=>{const d=req.result;if(!d.objectStoreNames.contains(STORE))d.createObjectStore(STORE,{keyPath:'key'});};req.onsuccess=()=>resolve(req.result);req.onerror=()=>reject(req.error);});}
 function allRecords(){return new Promise((resolve,reject)=>{const tx=db.transaction(STORE,'readonly');const r=tx.objectStore(STORE).getAll();r.onsuccess=()=>resolve(r.result||[]);r.onerror=()=>reject(r.error);});}
 function putRecord(record){return new Promise((resolve,reject)=>{const tx=db.transaction(STORE,'readwrite');tx.objectStore(STORE).put(record);tx.oncomplete=()=>resolve();tx.onerror=()=>reject(tx.error);});}
+function putRecords(records){return new Promise((resolve,reject)=>{if(!records.length){resolve();return;}const tx=db.transaction(STORE,'readwrite'),store=tx.objectStore(STORE);for(const record of records)store.put(record);tx.oncomplete=()=>resolve();tx.onerror=()=>reject(tx.error);});}
 function deleteKey(key){return new Promise((resolve,reject)=>{const tx=db.transaction(STORE,'readwrite');tx.objectStore(STORE).delete(key);tx.oncomplete=()=>resolve();tx.onerror=()=>reject(tx.error);});}
 function clearAll(){return new Promise((resolve,reject)=>{const tx=db.transaction(STORE,'readwrite');tx.objectStore(STORE).clear();tx.oncomplete=()=>resolve();tx.onerror=()=>reject(tx.error);});}
 function csvEscape(s){const v=String(s??'');return /[",\n\r]/.test(v)?'"'+v.replace(/"/g,'""')+'"':v;}
@@ -416,6 +417,39 @@ document.getElementById('pick-list').addEventListener('change',async e=>{const k
 document.getElementById('pick-list').addEventListener('click',async e=>{const key=e.target.dataset.delete;if(!key)return;if(confirm('¿Eliminar este pick?')){await deleteKey(key);await refresh();}});
 document.getElementById('export-backup').addEventListener('click',async()=>{const payload={app:'Basketball Edge Analyst v20 iPhone UI',version:1,exported_at:new Date().toISOString(),records:await allRecords()};download('basketball-edge-v20-backup-'+new Date().toISOString().slice(0,10)+'.json',JSON.stringify(payload,null,2),'application/json');});
 document.getElementById('restore-backup').addEventListener('click',async()=>{const msg=document.getElementById('backup-message'),file=document.getElementById('backup-file').files[0];if(!file){msg.textContent='Seleccioná un archivo JSON primero.';return;}try{const data=JSON.parse(await file.text());if(!data||!Array.isArray(data.records))throw new Error('El archivo no parece ser un respaldo válido.');const incoming=data.records.filter(r=>r&&typeof r.key==='string'&&(r.kind==='pick'||r.kind==='dataset'||r.kind==='bookmaker_offer'));if(!incoming.length)throw new Error('El respaldo no contiene registros compatibles.');const kinds=new Set(incoming.map(r=>r.kind));const labels={dataset:'historial y estadísticas',pick:'picks guardados',bookmaker_offer:'cuotas manuales'};const replacing=Array.from(kinds).map(k=>labels[k]||k).join(', ');if(!confirm('Se reemplazarán solo estos tipos: '+replacing+'. Los demás datos locales se conservarán. ¿Continuar?'))return;const existing=await allRecords();for(const record of existing){if(kinds.has(record.kind))await deleteKey(record.key);}for(const record of incoming)await putRecord(record);msg.textContent='Respaldo restaurado. Se conservaron los datos de tipos no incluidos en el archivo.';await refresh();}catch(e){msg.textContent='No se pudo restaurar: '+e.message;}});
+const seedHistoryButton=document.getElementById('load-seed-history');
+seedHistoryButton.addEventListener('click',async()=>{
+ const message=document.getElementById('seed-history-message');
+ seedHistoryButton.disabled=true;seedHistoryButton.textContent='Descargando historial…';
+ message.textContent='Descargando y validando el respaldo inicial desde GitHub…';
+ try{
+  const url='https://raw.githubusercontent.com/chat66189-wq/basketball-edge-mobile/main/data/history-seed-2026-11-23.json';
+  const response=await fetch(url,{cache:'no-store'});
+  if(!response.ok)throw new Error('GitHub respondió HTTP '+response.status+'.');
+  const payload=await response.json();
+  if(!payload||payload.app!=='Basketball Edge Analyst v20 iPhone UI'||!Array.isArray(payload.records)){
+   throw new Error('El archivo remoto no tiene el formato esperado del respaldo v20.');
+  }
+  const incoming=payload.records.filter(r=>r&&r.kind==='dataset'&&
+   (r.type==='games'||r.type==='team_stats')&&typeof r.key==='string'&&r.data&&typeof r.data==='object');
+  const gameCount=incoming.filter(r=>r.type==='games').length;
+  const statCount=incoming.filter(r=>r.type==='team_stats').length;
+  if(gameCount!==1064||statCount!==2122||incoming.length!==3186){
+   throw new Error('El respaldo remoto no coincide con la versión verificada (1064 partidos y 2122 estadísticas). No se importó nada.');
+  }
+  const existing=await allRecords(),keys=new Set(existing.map(r=>r.key));
+  const additions=incoming.filter(r=>!keys.has(r.key));
+  await putRecords(additions);
+  await refresh();
+  message.textContent='Historial agregado: '+additions.filter(r=>r.type==='games').length+' partidos y '+
+   additions.filter(r=>r.type==='team_stats').length+' estadísticas nuevas. '+
+   (incoming.length-additions.length)+' registros ya estaban guardados. No se reemplazó ni borró ningún dato.';
+ }catch(error){
+  message.textContent='No se pudo cargar el historial: '+error.message;
+ }finally{
+  seedHistoryButton.disabled=false;seedHistoryButton.textContent='Cargar historial inicial desde GitHub';
+ }
+});
 const apiInput=document.getElementById('api-url');
 const apiMessage=document.getElementById('api-message');
 const savedApi=localStorage.getItem('bea-v20-api-url')||'';apiInput.value=savedApi;
