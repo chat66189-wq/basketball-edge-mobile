@@ -144,6 +144,7 @@
           <div><label for="parlay-end">Hasta (hora local)</label><input id="parlay-end" type="datetime-local" required></div>
         </div>
         <label for="parlay-target">Cuota total objetivo</label><input id="parlay-target" type="number" min="1.01" max="100" step="0.01" value="4.00" required>
+        <label class="small" style="display:flex;gap:8px;align-items:center"><input id="best-effort-mode" type="checkbox" checked> Si no hay combinada estricta, buscar automáticamente la mejor alternativa de mejor esfuerzo</label>
         <div class="actions"><button class="action" type="button" id="preview-local">Analizar candidatos localmente (sin cuotas)</button><button class="action secondary" type="button" id="check-hoopsapi">Comprobar proveedor de cuotas</button><button class="action" type="button" id="build-parlay">Buscar mejores picks y armar combinada automática</button><button class="action" type="button" id="build-bookmaker-parlay">Buscar picks y combinada con cuotas guardadas de esta casa</button><button class="action secondary" type="button" id="run-backtest">Medir acierto real del modelo (backtest)</button></div><div id="backtest-result" class="small"></div>
         <div id="parlay-message" class="fileline" aria-live="polite"></div>
         <div id="parlay-result"></div>
@@ -171,6 +172,9 @@
     <section id="tab-respaldo" class="hidden">
       <div class="panel"><h2>Respaldo de información</h2><p class="muted">Exportá una copia de los datos guardados en este navegador. Guardala en Archivos o en otro lugar seguro.</p>
         <div class="actions"><button class="action" id="export-backup">Exportar respaldo JSON</button></div>
+        <div class="actions"><button class="action secondary" type="button" id="load-seed-history">Cargar historial inicial desde GitHub</button></div>
+        <p class="small">Historial base parcial del 23/11/2026: 1.064 partidos y 2.122 registros de estadísticas. Se agrega sin reemplazar ni borrar datos existentes, picks o cuotas.</p>
+        <div id="seed-history-message" class="fileline" aria-live="polite"></div>
         <label for="backup-file">Restaurar desde un respaldo JSON</label><input type="file" id="backup-file" accept=".json,application/json">
         <div class="actions"><button class="action secondary" id="restore-backup">Restaurar respaldo</button></div><div id="backup-message" class="fileline" aria-live="polite"></div>
       </div>
@@ -631,6 +635,7 @@ function parlayCandidateHtml(c,index){
  '<p>Proyección base: '+Number(c.projected_home_points).toFixed(1)+'–'+Number(c.projected_away_points).toFixed(1)+' · Total '+Number(c.projected_total_points).toFixed(1)+' puntos · Ritmo '+Number(c.projected_pace).toFixed(1)+'</p>'+
  '<p>Simulación bruta '+pct(c.raw_model_probability)+' · Mercado sin margen '+pct(c.market_probability)+' · Casas de consenso '+Number(c.market_consensus_bookmakers||0)+' · Dispersión '+Number(c.market_probability_range_pp||0).toFixed(1)+' pp</p>'+
  '<p>Ventaja conservadora '+Number(c.edge_percentage_points).toFixed(1)+' pp · EV teórico '+Number(c.expected_value_per_unit).toFixed(3)+'</p>'+
+ (c.passes_strict_filters===false?'<p class="notice"><strong>MEJOR ESFUERZO:</strong> este pick no cumple todos los filtros estrictos.</p>':'<p class="small">Cumple los filtros estrictos del motor.</p>')+
  '<p>Muestra: '+c.home_history_games+'/'+c.away_history_games+' partidos · '+Number(c.simulation_count||25000).toLocaleString('es-AR')+' simulaciones · Cuotas capturadas: '+safe(c.odds_captured_at)+'</p>'+
  '<button class="action secondary" type="button" data-save-index="'+index+'">Guardar este pick</button></article>';
 }
@@ -776,13 +781,14 @@ document.getElementById('build-parlay').addEventListener('click',async()=>{
   parlayMessage.textContent='Consultando calendario y cuotas del proveedor configurado. Enviando '+games.length+' partidos históricos y '+teamStats.length+' registros de equipo…';
   const response=await fetch(base+'/api/parlay/recommend',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
    window_start:new Date(start).toISOString(),window_end:new Date(end).toISOString(),target_odds:target,
-   simulations:25000,minimum_history_games:12,games:games,team_stats:teamStats
+   simulations:25000,minimum_history_games:12,best_effort:document.getElementById('best-effort-mode').checked,
+   games:games,team_stats:teamStats
   })});
   let data;try{data=await response.json();}catch(_){throw new Error('El servidor devolvió una respuesta no válida.');}
   if(!response.ok)throw new Error(data.detail||('HTTP '+response.status));
   lastRecommendation=data;
   const stats='<p>Partidos con cuotas en la ventana: '+data.matches_in_window+' · Competiciones compatibles: '+Number(data.matches_matching_imported_competitions||0)+' · Analizados: '+data.matches_analysed+' · Picks que superan filtros: '+data.eligible_market_selections+'</p><p><strong>Filtros:</strong> '+pct(data.minimum_estimated_leg_probability)+' mínimo conservador · '+Number(data.minimum_history_games||12)+' partidos históricos por equipo · cuotas recientes y consenso de al menos 3 casas.</p>';
-  const filterLabels={market_groups_seen:'grupos de mercados encontrados',no_paired_market_prices:'mercados sin precios emparejados',fewer_than_3_bookmakers:'mercados con menos de 3 casas',market_dispersion_over_4pp:'mercados con dispersión mayor a 4 pp',push_probability_over_0_5pp:'selecciones con probabilidad de devolución alta',model_probability_below_72pct:'probabilidad bruta menor al 72%',no_vig_market_probability_below_60pct:'probabilidad de mercado menor al 60%',model_market_gap_over_12pp:'diferencia modelo-mercado mayor a 12 pp',conservative_probability_below_70pct:'probabilidad conservadora menor al 70%',edge_or_expected_value_not_positive_enough:'ventaja o valor esperado insuficiente',selections_passing_all_filters:'selecciones que pasan todos los filtros'};
+  const filterLabels={market_groups_seen:'grupos de mercados encontrados',no_paired_market_prices:'mercados sin precios emparejados',fewer_than_3_bookmakers:'mercados con menos de 3 casas',market_dispersion_over_4pp:'mercados con dispersión mayor a 4 pp',push_probability_over_0_5pp:'selecciones con probabilidad de devolución alta',model_probability_below_72pct:'probabilidad bruta menor al 72%',no_vig_market_probability_below_60pct:'probabilidad de mercado menor al 60%',model_market_gap_over_12pp:'diferencia modelo-mercado mayor a 12 pp',conservative_probability_below_70pct:'probabilidad conservadora menor al 70%',edge_or_expected_value_not_positive_enough:'ventaja o valor esperado insuficiente',best_effort_model_probability_below_60pct:'probabilidad bruta menor al 60% (mejor esfuerzo)',best_effort_market_probability_below_55pct:'probabilidad de mercado menor al 55% (mejor esfuerzo)',best_effort_model_market_gap_over_15pp:'diferencia modelo-mercado mayor a 15 pp (mejor esfuerzo)',best_effort_conservative_probability_below_58pct:'probabilidad conservadora menor al 58% (mejor esfuerzo)',best_effort_expected_value_below_minus_8pct:'EV inferior a -8% (mejor esfuerzo)',selections_passing_all_filters:'selecciones que pasan filtros estrictos'};
   const filterAudit='<p><strong>Motivos de descarte:</strong> '+(Object.entries(data.filter_diagnostics||{}).map(([k,v])=>safe(filterLabels[k]||k)+': '+Number(v)).join(' · ')||'No se registraron mercados evaluables')+'</p>';
   const skips=data.skipped&&Object.keys(data.skipped).length?'<p class="small">No analizados: '+Object.entries(data.skipped).map(([k,v])=>safe(k)+' ('+v+')').join(' · ')+'</p>':'';
   const diagnostic='<details class="small" style="margin:10px 0" open><summary>Diagnóstico de datos y competiciones</summary>'+
@@ -813,7 +819,8 @@ document.getElementById('build-parlay').addEventListener('click',async()=>{
     '<p><strong>Operador:</strong> '+safe(data.best_parlay.bookmaker)+'</p>'+
     '<p><strong>Cuota objetivo:</strong> '+Number(data.target_odds).toFixed(2)+' · Banda permitida ±'+Number(data.target_odds_band?.tolerance_percent||5).toFixed(0)+'% ('+Number(data.target_odds_band?.minimum||data.target_odds*0.95).toFixed(2)+'–'+Number(data.target_odds_band?.maximum||data.target_odds*1.05).toFixed(2)+')</p>'+
      '<p><strong>Cuota combinada:</strong> '+Number(data.best_parlay.combined_odds).toFixed(2)+' · Desvío '+(Number(data.best_parlay.odds_deviation)>=0?'+':'')+Number(data.best_parlay.odds_deviation).toFixed(2)+' ('+(Number(data.best_parlay.odds_deviation_percent)>=0?'+':'')+Number(data.best_parlay.odds_deviation_percent).toFixed(1)+'%) · <strong>Probabilidad estimada:</strong> '+pct(data.best_parlay.estimated_hit_probability)+'</p>'+
-    data.best_parlay.legs.map((c,i)=>'<article class="record"><strong>'+safe(c.game)+'</strong><p>'+safe(c.competition)+' · '+safe(c.market_label)+' · '+safe(c.selection)+'</p><p>Cuota '+Number(c.odds).toFixed(2)+' · '+safe(c.bookmaker)+' · Probabilidad '+pct(c.probability)+'</p></article>').join('')+
+    (data.best_parlay.status==='BEST_EFFORT_NOT_VALIDATED'?'<p class="notice"><strong>BEST_EFFORT_NOT_VALIDATED:</strong> no apareció una combinada que pasara todos los filtros estrictos. Esta alternativa usa umbrales relajados y no está validada.</p>':'')+
+    data.best_parlay.legs.map((c,i)=>'<article class="record"><strong>'+safe(c.game)+'</strong><p>'+safe(c.competition)+' · '+safe(c.market_label)+' · '+safe(c.selection)+'</p><p>Cuota '+Number(c.odds).toFixed(2)+' · '+safe(c.bookmaker)+' · Probabilidad '+pct(c.probability)+'</p><p class="small">'+(c.passes_strict_filters?'Cumple filtros estrictos':'No cumple filtros estrictos · mejor esfuerzo')+'</p></article>').join('')+
     '<button class="action" type="button" data-save-combo="1">Guardar las piernas de la combinada</button>';
   }else{
    body+='<p class="notice">No se encontró una combinada dentro de la banda de ±5% de la cuota objetivo que mantenga todos los filtros de probabilidad y esté disponible en un mismo operador.</p>';
