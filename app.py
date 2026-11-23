@@ -663,9 +663,15 @@ def _modelable_competition_labels(
             1 for event_ids in bucket["team_events"].values()
             if len(event_ids) >= minimum_history
         )
+        team_counts = [len(event_ids) for event_ids in bucket["team_events"].values()]
+        missing_team_games = sum(max(0, minimum_history - n) for n in team_counts)
         audit[comp_key] = {
             "complete_games": int(bucket["complete_games"]),
             "teams_with_minimum_history": teams_ready,
+            "teams_total": len(team_counts),
+            "max_games_for_one_team": max(team_counts) if team_counts else 0,
+            # Each missing game fills two team slots, so halve the team-game gap.
+            "estimated_games_to_import": (missing_team_games + 1) // 2,
         }
         if teams_ready >= 2:
             eligible_labels.extend(bucket["labels"])
@@ -1750,6 +1756,16 @@ async def recommend_parlay(request: Request):
                 + ", ".join(excluded_competitions)
                 + "."
             )
+            # Say exactly what is missing so the user knows what to import.
+            for label in excluded_competitions:
+                info = competition_history_audit.get(_normalise_competition(label)) or {}
+                if info.get("teams_total"):
+                    warnings.append(
+                        f"Falta historial en {label}: {info['teams_total']} equipos, el más completo tiene "
+                        f"{info['max_games_for_one_team']}/{minimum_history} partidos con box score. "
+                        f"Importá unos {info['estimated_games_to_import']} partidos más (Importar desde SportAPI.ai) "
+                        "y volvé a buscar."
+                    )
         if not modelable_competition_labels:
             warnings.append(
                 f"Ninguna competición importada tiene dos equipos con al menos {minimum_history} partidos "
