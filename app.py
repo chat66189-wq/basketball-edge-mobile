@@ -66,7 +66,7 @@ MIN_ESTIMATED_LEG_PROBABILITY = 0.70
 MIN_RAW_MODEL_PROBABILITY = 0.72
 MIN_MARKET_PROBABILITY = 0.60
 MAX_MODEL_MARKET_GAP = 0.12
-MIN_AUTOMATIC_BOOKMAKER_CONSENSUS = 3
+MIN_AUTOMATIC_BOOKMAKER_CONSENSUS = 2
 MAX_MARKET_DISPERSION = 0.04
 MAX_QUOTE_AGE_SECONDS = 15 * 60
 MIN_HISTORICAL_GAMES = 12
@@ -948,8 +948,15 @@ def _score_fixture(fixture: dict, all_games: list[dict], all_stats: list[dict],
             str(q.get("bookmaker") or "").strip() for q in quotes
             if str(q.get("bookmaker") or "").strip()
         })
+        if diagnostics is not None and manual_groups is None:
+            consensus_key = (
+                "bookmaker_groups_1_house" if bookmaker_count == 1
+                else "bookmaker_groups_2_houses" if bookmaker_count == 2
+                else "bookmaker_groups_3plus_houses"
+            )
+            diagnostics[consensus_key] = diagnostics.get(consensus_key, 0) + 1
         if manual_groups is None and bookmaker_count < MIN_AUTOMATIC_BOOKMAKER_CONSENSUS:
-            reject("fewer_than_3_bookmakers")
+            reject("fewer_than_2_bookmakers")
             continue
 
         fair = {}
@@ -1598,10 +1605,9 @@ async def recommend_parlay(request: Request):
         if not 8 <= minimum_history <= 30:
             raise ValueError("minimum_history_games_must_be_between_8_and_30")
         minimum_history = max(MIN_HISTORICAL_GAMES, minimum_history)
-        best_effort_value = payload.get("best_effort", False)
-        if not isinstance(best_effort_value, bool):
-            raise ValueError("best_effort_must_be_boolean")
-        best_effort_requested = best_effort_value
+        # Automatic parlay requests always enforce the strict 70% policy.
+        # Ignore legacy clients that still send best_effort=true.
+        best_effort_requested = False
         all_games = payload.get("games")
         all_stats = payload.get("team_stats")
         if not isinstance(all_games, list) or not isinstance(all_stats, list):
@@ -1792,7 +1798,7 @@ async def recommend_parlay(request: Request):
             "EXPLORATORY_NOT_VALIDATED: el modelo no tiene validación walk-forward/holdout aprobada; el 70% no está calibrado ni es una tasa de acierto demostrada.",
             ("El modelo simula prórrogas de forma aproximada para mercados que las incluyen; no equivale a una liquidación oficial exacta." if provider_name == "OddsPapi" else "El modelo base simula tiempo reglamentario; las cuotas FT de HoopsAPI incluyen prórroga. La comparación de probabilidades no es perfectamente equivalente."),
             "Filtro reforzado: cada pierna debe superar 70% tras un descuento de incertidumbre de 2 puntos; exige simulación bruta >=72%, mercado sin margen >=60% y brecha modelo-mercado <=12 puntos porcentuales.",
-            "El análisis automático exige precios emparejados de al menos 3 casas y dispersión máxima de 4 puntos porcentuales entre ellas.",
+            "El análisis automático exige precios emparejados de al menos 2 casas y dispersión máxima de 4 puntos porcentuales entre ellas.",
             "Se exigen al menos 12 partidos históricos completos por equipo y cuotas capturadas en los últimos 15 minutos.",
             "La combinada se busca dentro de una banda de +/-5% de la cuota objetivo; puede quedar ligeramente por debajo o por encima, pero no fuera de ese rango.",
             "La probabilidad combinada multiplica las probabilidades de las piernas y supone independencia aproximada entre partidos; no estima correlaciones.",

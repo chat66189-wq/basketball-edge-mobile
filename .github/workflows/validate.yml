@@ -31,4 +31,4 @@ jobs:
           PY
           node --check /tmp/bea-v20-inline.js
       - name: Validate bundled history snapshot
-        run: python -m unittest discover -s tests -p "test_history_seed.py" -v
+        run: python -m unittest discover -s tests -p "test_*.py" -v

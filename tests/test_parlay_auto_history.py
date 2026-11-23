@@ -7,21 +7,13 @@ HTML = (ROOT / "index.html").read_text(encoding="utf-8")
 
 
 class ParlayAutomaticHistoryTests(unittest.TestCase):
-    def test_best_effort_is_disabled_by_default(self):
-        self.assertIn(
-            '<input id="best-effort-mode" type="checkbox">',
-            HTML,
-        )
-        self.assertNotIn(
-            '<input id="best-effort-mode" type="checkbox" checked>',
-            HTML,
-        )
+    def test_best_effort_is_removed_from_automatic_ui(self):
+        self.assertNotIn('id="best-effort-mode"', HTML)
+        self.assertIn("best_effort:false", HTML)
 
-    def test_auto_history_runs_only_when_odds_fixtures_have_no_history_match(self):
-        self.assertIn(
-            "data.provider==='OddsPapi'&&Number(data.matches_matching_imported_competitions||0)===0",
-            HTML,
-        )
+    def test_auto_history_runs_when_any_fixture_league_lacks_history(self):
+        self.assertIn("const hasMissingFixtureHistory=fixtureLabelsForTopUp.some", HTML)
+        self.assertIn("data.provider==='OddsPapi'&&hasMissingFixtureHistory", HTML)
         self.assertIn("autoTopUpHistoryForFixtures(data)", HTML)
         self.assertIn("data.fixture_competitions_in_window", HTML)
 
