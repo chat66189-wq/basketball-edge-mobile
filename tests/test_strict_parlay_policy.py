@@ -6,6 +6,7 @@ ROOT = Path(__file__).resolve().parents[1]
 APP = (ROOT / "app.py").read_text(encoding="utf-8")
 HTML = (ROOT / "index.html").read_text(encoding="utf-8")
 SERVICE_WORKER = (ROOT / "sw.js").read_text(encoding="utf-8")
+ODDSPAPI = (ROOT / "oddspapi_provider.py").read_text(encoding="utf-8")
 
 
 class StrictParlayPolicyTests(unittest.TestCase):
@@ -37,6 +38,14 @@ class StrictParlayPolicyTests(unittest.TestCase):
             "data.matches_matching_imported_competitions||0)===0",
             HTML,
         )
+
+    def test_ncaam_and_g_league_fixture_aliases_are_normalized_consistently(self):
+        self.assertIn(') else "men"', APP)
+        self.assertIn('return "nbagleague"', APP)
+        self.assertIn(') else "men"', ODDSPAPI)
+        self.assertIn('return "nbagleague"', ODDSPAPI)
+        self.assertIn("const ncaaGender=(label.includes('women')", HTML)
+        self.assertIn("if(label.startsWith('nbagleague'))return 'nbagleague'", HTML)
 
     def test_service_worker_refreshes_navigation_and_invalidates_prior_cache(self):
         self.assertIn("basketball-edge-v32-strict70-two-bookmakers", SERVICE_WORKER)

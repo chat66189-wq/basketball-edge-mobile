@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 import unittest
 
 from oddspapi_provider import (
+    _competition_key,
     _market_family,
     _normalise_odds_fixture,
     _parse_label,
@@ -80,6 +81,11 @@ class OddsPapiBasketballNormalizationTests(unittest.TestCase):
         self.assertEqual(_market_family("Over Under (incl. overtime)"), "total")
         self.assertEqual(_market_family("Handicap (incl. overtime)"), "spread")
         self.assertIsNone(_market_family("Over Under First Quarter"))
+
+    def test_provider_competition_aliases_match_local_history_labels(self):
+        self.assertEqual(_competition_key("NCAA, Regular Season"), "ncaadivision1men")
+        self.assertEqual(_competition_key("NCAA Women, Regular Season"), "ncaadivision1women")
+        self.assertEqual(_competition_key("NBA G League Tip-Off Tournament"), "nbagleague")
 
     def test_bookmaker_labels_decode_spreads_and_totals(self):
         self.assertEqual(_parse_label("-4.5/home"), ("home", -4.5))

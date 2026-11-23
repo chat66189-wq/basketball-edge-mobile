@@ -578,7 +578,7 @@ def _normalise_competition(value: Any) -> str:
         ) else "men" if (
             "men" in label or "male" in label
             or label.endswith(("ncaam", "ncaadim", "ncaad1m", "ncaadivisionim"))
-        ) else ""
+        ) else "men"
         if ncaa_gender:
             if any(token in label for token in ("divisioniii", "division3", "diviii", "div3", "ncaa3")):
                 division = "3"
@@ -588,6 +588,10 @@ def _normalise_competition(value: Any) -> str:
                 # "NCAA Women" is the provider's short label for Division I.
                 division = "1"
             return "ncaadivision" + division + ncaa_gender
+
+    # The G League Tip-Off Tournament is part of the same NBA G League competition history.
+    if label.startswith("nbagleague"):
+        return "nbagleague" + ("women" if "women" in label or "female" in label else "")
 
     # NBA provider labels may include "men", "basketball", or country descriptors.
     if label in {"nba", "nbamen", "nationalbasketballassociation", "nationalbasketballassociationmen"}:
