@@ -1,0 +1,25 @@
+name: OddsPapi normalization regression tests
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "oddspapi_provider.py"
+      - "tests/**"
+      - ".github/workflows/test-oddspapi-normalization.yml"
+  pull_request:
+    paths:
+      - "oddspapi_provider.py"
+      - "tests/**"
+      - ".github/workflows/test-oddspapi-normalization.yml"
+
+jobs:
+  normalization:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Run OddsPapi normalization regression tests
+        run: python -m unittest discover -s tests -v
