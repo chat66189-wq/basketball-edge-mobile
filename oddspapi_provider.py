@@ -504,6 +504,9 @@ def _normalise_odds_fixture(fixture: dict, odds: dict, market_families: dict[str
         "parsed_outcomes": 0,
         "outcomes_mapped_by_catalogue": 0,
         "outcomes_mapped_by_position": 0,
+        "lines_from_bookmaker_label": 0,
+        "lines_from_catalogue": 0,
+        "missing_market_line": 0,
         "unparsed_outcomes": 0,
         "stale_prices": 0,
         "incomplete_bookmaker_market_pairs": 0,
@@ -594,13 +597,18 @@ def _normalise_odds_fixture(fixture: dict, odds: dict, market_families: dict[str
                 elif source == "position":
                     audit["outcomes_mapped_by_position"] += 1
 
+                if raw_line is not None:
+                    audit["lines_from_bookmaker_label"] += 1
+
                 if family == "moneyline":
                     line = None
                 elif family == "total":
                     line_value = raw_line if raw_line is not None else metadata.get("handicap")
                     if line_value is None:
-                        audit["unparsed_outcomes"] += 1
+                        audit["missing_market_line"] += 1
                         continue
+                    if raw_line is None:
+                        audit["lines_from_catalogue"] += 1
                     line = round(float(line_value), 2)
                 else:
                     if raw_line is not None:
@@ -608,8 +616,10 @@ def _normalise_odds_fixture(fixture: dict, odds: dict, market_families: dict[str
                     else:
                         line_value = metadata.get("handicap")
                     if line_value is None:
-                        audit["unparsed_outcomes"] += 1
+                        audit["missing_market_line"] += 1
                         continue
+                    if raw_line is None:
+                        audit["lines_from_catalogue"] += 1
                     line = round(float(line_value), 2)
 
                 key = (family, line)
@@ -835,7 +845,9 @@ def games(
                 "source_changes_over_1h": 0, "source_timestamp_missing_or_invalid": 0,
                 "source_timestamp_future": 0,
                 "parsed_outcomes": 0, "outcomes_mapped_by_catalogue": 0,
-                "outcomes_mapped_by_position": 0, "unparsed_outcomes": 0,
+                "outcomes_mapped_by_position": 0, "lines_from_bookmaker_label": 0,
+                "lines_from_catalogue": 0, "missing_market_line": 0,
+                "unparsed_outcomes": 0,
                 "stale_prices": 0, "incomplete_bookmaker_market_pairs": 0,
                 "paired_quotes": 0, "normalized_market_groups": 0,
             },
@@ -848,7 +860,8 @@ def games(
         "active_prices", "fresh_prices", "source_changes_within_1h",
         "source_changes_over_1h", "source_timestamp_missing_or_invalid",
         "source_timestamp_future", "parsed_outcomes", "outcomes_mapped_by_catalogue",
-        "outcomes_mapped_by_position", "unparsed_outcomes", "stale_prices", "incomplete_bookmaker_market_pairs", "paired_quotes",
+        "outcomes_mapped_by_position", "lines_from_bookmaker_label",
+        "lines_from_catalogue", "missing_market_line", "unparsed_outcomes", "stale_prices", "incomplete_bookmaker_market_pairs", "paired_quotes",
         "normalized_market_groups",
     )
     odds_data_audit = {key: 0 for key in audit_fields}
