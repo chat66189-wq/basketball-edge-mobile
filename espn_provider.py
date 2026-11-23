@@ -65,7 +65,11 @@ def _competition_key(value: str) -> str:
         return "nbagleague"
     if "ncaa" in label:
         return "ncaadivision1women" if ("women" in label or "female" in label or label.endswith(("ncaaw", "ncaadiw", "ncaad1w"))) else "ncaadivision1men"
-    if label.startswith("nba") or label == "nationalbasketballassociation":
+    if label in {"nba", "nbamen", "nationalbasketballassociation", "nationalbasketballassociationmen"}:
+        return "nba"
+    if label.startswith("nba") and not label.startswith(
+        ("nbasummer", "nbacalifornia", "nbautah", "nbasaltlake", "nbapreseason")
+    ) and "summerleague" not in label and "classic" not in label and "development" not in label:
         return "nba"
     return label
 
@@ -277,7 +281,7 @@ def _summary_rows(event: dict) -> list[dict]:
     summary = _get_json(
         event["_league_slug"] + "/summary",
         {"event": event["espn_id"]},
-        ttl=30 * 24 * 3600,
+        ttl=0,
     )
     boxscore = summary.get("boxscore") or {}
     entries = boxscore.get("teams") or []
@@ -345,6 +349,7 @@ def sync(competitions: str, days: int = 400, max_games_per_league: int = 180) ->
     all_stats = []
     total_events_seen = 0
     failed_summaries = 0
+    incomplete_boxscores = 0
     for key, spec in selected:
         event_index = {}
         def fetch_month(month):
@@ -390,6 +395,9 @@ def sync(competitions: str, days: int = 400, max_games_per_league: int = 180) ->
                 except Exception:
                     failed_summaries += 1
                     continue
+                if len(rows) != 2:
+                    incomplete_boxscores += 1
+                    continue
                 all_games.append({k: v for k, v in event.items() if not k.startswith("_")})
                 all_stats.extend(rows)
 
@@ -403,6 +411,8 @@ def sync(competitions: str, days: int = 400, max_games_per_league: int = 180) ->
     ]
     if unsupported:
         warnings.append("Competiciones sin cobertura ESPN mapeada: " + ", ".join(sorted(set(unsupported))) + ".")
+    if incomplete_boxscores:
+        warnings.append(str(incomplete_boxscores) + " partidos no tenían box score completo de ambos equipos y se excluyeron.")
     if failed_summaries:
         warnings.append(str(failed_summaries) + " resúmenes no se pudieron recuperar; se omitieron sin inventar estadísticas.")
     return {
@@ -415,6 +425,8 @@ def sync(competitions: str, days: int = 400, max_games_per_league: int = 180) ->
         "games_received": len(all_games),
         "complete_boxscore_games": len(complete_ids),
         "team_stats_rows": len(all_stats),
+        "incomplete_boxscores_excluded": incomplete_boxscores,
+        "failed_summaries": failed_summaries,
         "games": all_games,
         "team_stats": all_stats,
         "warnings": warnings,
