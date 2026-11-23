@@ -11,7 +11,7 @@ from oddspapi_provider import (
 class OddsPapiBasketballNormalizationTests(unittest.TestCase):
     def setUp(self):
         self.now = datetime(2026, 11, 23, 4, 0, tzinfo=timezone.utc)
-        self.captured = (self.now - timedelta(minutes=2)).isoformat()
+        self.captured = (self.now - timedelta(minutes=25)).isoformat()
         self.fixture = {
             "fixtureId": "test-fixture",
             "participant1Name": "Home Club",
@@ -104,6 +104,9 @@ class OddsPapiBasketballNormalizationTests(unittest.TestCase):
         self.assertEqual(normalized["odds_audit"]["outcomes_mapped_by_position"], 6)
         self.assertEqual(normalized["odds_audit"]["paired_quotes"], 9)
         self.assertEqual(normalized["odds_audit"]["normalized_market_groups"], 9)
+        self.assertEqual(normalized["odds_audit"]["fresh_prices"], 18)
+        self.assertEqual(normalized["odds_audit"]["source_changes_within_1h"], 18)
+        self.assertEqual(normalized["odds_audit"]["missing_market_line"], 0)
 
         ft = normalized["periods"]["ft"]
         self.assertEqual(len(ft), 3)
@@ -113,6 +116,7 @@ class OddsPapiBasketballNormalizationTests(unittest.TestCase):
             self.assertEqual(len(markets["spread"]), 1)
             self.assertGreater(markets["moneyline"][0]["home"], 1.0)
             self.assertGreater(markets["moneyline"][0]["away"], 1.0)
+            self.assertEqual(markets["moneyline"][0]["captured_at"], self.now.isoformat())
             self.assertEqual(markets["total"][0]["line"], 220.5)
             self.assertEqual(markets["spread"][0]["line"], -4.5)
 
