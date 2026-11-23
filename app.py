@@ -1526,6 +1526,14 @@ def oddspapi_status():
     except OddsPapiError as exc:
         raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
 
+@app.get("/api/oddspapi/market-audit")
+def oddspapi_market_audit():
+    from oddspapi_provider import market_catalogue_audit, OddsPapiError
+    try:
+        return market_catalogue_audit()
+    except OddsPapiError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
+
 
 @app.post("/api/parlay/recommend")
 async def recommend_parlay(request: Request):
