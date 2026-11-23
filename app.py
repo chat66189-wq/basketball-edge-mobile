@@ -559,7 +559,7 @@ def _normalise_competition(value: Any) -> str:
         return "wnba"
 
     # Keep the Australian NBL distinct from WNBL and other national leagues.
-    if label in {"nbl", "nblmen", "nationalbasketballleague", "nationalbasketballleaguemen", "australiannbl", "australiannationalbasketballleague"}:
+    if label in {"nbl", "nblmen", "nationalbasketballleague", "nationalbasketballleaguemen", "australianbl", "australiannationalbasketballleague", "nationalbasketballleagueaustralia"}:
         return "nbl"
 
     gender = "women" if ("women" in label or "female" in label) else ""
