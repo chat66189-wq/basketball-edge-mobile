@@ -472,17 +472,17 @@ def _select_bookmakers(available_bookmakers: list[str]) -> list[str]:
     return chosen[:MAX_BOOKMAKERS_PER_FIXTURE]
 
 
-def _fresh_timestamp(value: str | None, now: datetime) -> bool:
+def _source_timestamp_age(value: str | None, now: datetime) -> float | None:
+    """Age of the provider's last price change; this is not the time we captured the quote."""
     if not value:
-        return False
+        return None
     try:
         parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
         if parsed.tzinfo is None:
             parsed = parsed.replace(tzinfo=timezone.utc)
-        age = (now - parsed.astimezone(timezone.utc)).total_seconds()
-        return -300 <= age <= 3600
+        return (now - parsed.astimezone(timezone.utc)).total_seconds()
     except (TypeError, ValueError):
-        return False
+        return None
 
 
 def _normalise_odds_fixture(fixture: dict, odds: dict, market_families: dict[str, dict], now: datetime) -> dict:
@@ -497,6 +497,10 @@ def _normalise_odds_fixture(fixture: dict, odds: dict, market_families: dict[str
         "recognized_market_instances": 0,
         "active_prices": 0,
         "fresh_prices": 0,
+        "source_changes_within_1h": 0,
+        "source_changes_over_1h": 0,
+        "source_timestamp_missing_or_invalid": 0,
+        "source_timestamp_future": 0,
         "parsed_outcomes": 0,
         "outcomes_mapped_by_catalogue": 0,
         "outcomes_mapped_by_position": 0,
@@ -548,10 +552,20 @@ def _normalise_odds_fixture(fixture: dict, odds: dict, market_families: dict[str
                 audit["active_prices"] += 1
 
                 changed = player.get("changedAt") or player.get("bookmakerChangedAt") or (odds or {}).get("updatedAt")
-                if not _fresh_timestamp(changed, now):
-                    audit["stale_prices"] += 1
-                    continue
+                # changedAt is the last PRICE CHANGE, not the time this live
+                # /odds response was captured. An unchanged active price is
+                # still the current quote returned by this request.
+                observed_at = now.astimezone(timezone.utc).isoformat()
                 audit["fresh_prices"] += 1
+                source_age = _source_timestamp_age(changed, now)
+                if source_age is None:
+                    audit["source_timestamp_missing_or_invalid"] += 1
+                elif source_age < -300:
+                    audit["source_timestamp_future"] += 1
+                elif source_age <= 3600:
+                    audit["source_changes_within_1h"] += 1
+                else:
+                    audit["source_changes_over_1h"] += 1
 
                 allowed_sides = set(ordered_sides)
                 parsed = _parse_label(player.get("bookmakerOutcomeId"))
@@ -600,7 +614,9 @@ def _normalise_odds_fixture(fixture: dict, odds: dict, market_families: dict[str
 
                 key = (family, line)
                 groups.setdefault(key, {}).setdefault(str(bookmaker), {})[side] = {
-                    "price": price, "captured_at": changed
+                    "price": price,
+                    "captured_at": observed_at,
+                    "source_changed_at": str(changed or ""),
                 }
 
     ft: dict[str, dict] = {}
@@ -815,7 +831,10 @@ def games(
             "odds_data_audit": {
                 "bookmaker_boards": 0, "active_bookmaker_boards": 0,
                 "recognized_market_instances": 0, "active_prices": 0,
-                "fresh_prices": 0, "parsed_outcomes": 0, "outcomes_mapped_by_catalogue": 0,
+                "fresh_prices": 0, "source_changes_within_1h": 0,
+                "source_changes_over_1h": 0, "source_timestamp_missing_or_invalid": 0,
+                "source_timestamp_future": 0,
+                "parsed_outcomes": 0, "outcomes_mapped_by_catalogue": 0,
                 "outcomes_mapped_by_position": 0, "unparsed_outcomes": 0,
                 "stale_prices": 0, "incomplete_bookmaker_market_pairs": 0,
                 "paired_quotes": 0, "normalized_market_groups": 0,
@@ -826,7 +845,9 @@ def games(
     normalized = []
     audit_fields = (
         "bookmaker_boards", "active_bookmaker_boards", "recognized_market_instances",
-        "active_prices", "fresh_prices", "parsed_outcomes", "outcomes_mapped_by_catalogue",
+        "active_prices", "fresh_prices", "source_changes_within_1h",
+        "source_changes_over_1h", "source_timestamp_missing_or_invalid",
+        "source_timestamp_future", "parsed_outcomes", "outcomes_mapped_by_catalogue",
         "outcomes_mapped_by_position", "unparsed_outcomes", "stale_prices", "incomplete_bookmaker_market_pairs", "paired_quotes",
         "normalized_market_groups",
     )
