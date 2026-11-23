@@ -425,7 +425,7 @@ def _fresh_timestamp(value: str | None, now: datetime) -> bool:
 
 
 def _normalise_odds_fixture(fixture: dict, odds: dict, market_families: dict[str, dict], now: datetime) -> dict:
-    """Normalize active paired bookmaker prices using market-catalogue metadata."""
+    """Normalize active paired bookmaker prices using OddsPapi's documented outcome ordering."""
     home = str(fixture.get("participant1Name") or "").strip()
     away = str(fixture.get("participant2Name") or "").strip()
     groups: dict[tuple, dict[str, dict]] = {}
@@ -437,6 +437,8 @@ def _normalise_odds_fixture(fixture: dict, odds: dict, market_families: dict[str
         "active_prices": 0,
         "fresh_prices": 0,
         "parsed_outcomes": 0,
+        "outcomes_mapped_by_catalogue": 0,
+        "outcomes_mapped_by_position": 0,
         "unparsed_outcomes": 0,
         "stale_prices": 0,
         "incomplete_bookmaker_market_pairs": 0,
@@ -445,6 +447,7 @@ def _normalise_odds_fixture(fixture: dict, odds: dict, market_families: dict[str
     }
     if not isinstance(boards, dict):
         boards = {}
+
     for bookmaker, board in boards.items():
         if not isinstance(board, dict) or not board.get("bookmakerIsActive", True) or board.get("suspended"):
             continue
@@ -452,6 +455,7 @@ def _normalise_odds_fixture(fixture: dict, odds: dict, market_families: dict[str
         markets = board.get("markets") or {}
         if not isinstance(markets, dict):
             continue
+
         for market_id, market in markets.items():
             metadata = market_families.get(str(market_id))
             if not metadata or not isinstance(market, dict):
@@ -460,7 +464,14 @@ def _normalise_odds_fixture(fixture: dict, odds: dict, market_families: dict[str
             if family not in {"moneyline", "spread", "total"} or not market.get("marketActive", True):
                 continue
             audit["recognized_market_instances"] += 1
-            for outcome_id, outcome in (market.get("outcomes") or {}).items():
+
+            raw_outcomes = market.get("outcomes") or {}
+            if not isinstance(raw_outcomes, dict):
+                continue
+            outcome_ids = list(raw_outcomes.keys())
+            ordered_sides = ("home", "away") if family in {"moneyline", "spread"} else ("over", "under")
+
+            for position, (outcome_id, outcome) in enumerate(raw_outcomes.items()):
                 if not isinstance(outcome, dict):
                     continue
                 players = outcome.get("players") or {}
@@ -474,37 +485,49 @@ def _normalise_odds_fixture(fixture: dict, odds: dict, market_families: dict[str
                 if not (1.0001 < price < 1000):
                     continue
                 audit["active_prices"] += 1
+
                 changed = player.get("changedAt") or player.get("bookmakerChangedAt") or (odds or {}).get("updatedAt")
                 if not _fresh_timestamp(changed, now):
                     audit["stale_prices"] += 1
                     continue
                 audit["fresh_prices"] += 1
 
-                # Prefer the bookmaker label; fall back to canonical outcomeName
-                # from /markets when a feed uses numeric or provider-specific IDs.
+                allowed_sides = set(ordered_sides)
                 parsed = _parse_label(player.get("bookmakerOutcomeId"))
-                allowed_sides = {"home", "away"} if family in {"moneyline", "spread"} else {"over", "under"}
+                source = "bookmaker"
                 if parsed is None or parsed[0] not in allowed_sides:
                     catalogue_label = (metadata.get("outcomes") or {}).get(str(outcome_id))
                     parsed = _parse_label(catalogue_label)
+                    source = "catalogue"
+
+                # OddsPapi's basketball examples explicitly use outcome order
+                # for two-way moneylines when a bookmaker sends opaque numeric
+                # bookmakerOutcomeId values. Apply the same documented order to
+                # full-game two-way spread/total markets only as a last fallback.
                 if parsed is None or parsed[0] not in allowed_sides:
-                    audit["unparsed_outcomes"] += 1
-                    continue
+                    if position < len(ordered_sides) and len(outcome_ids) == 2:
+                        parsed = (ordered_sides[position], None)
+                        source = "position"
+                    else:
+                        audit["unparsed_outcomes"] += 1
+                        continue
+
                 side, raw_line = parsed
                 audit["parsed_outcomes"] += 1
+                if source == "catalogue":
+                    audit["outcomes_mapped_by_catalogue"] += 1
+                elif source == "position":
+                    audit["outcomes_mapped_by_position"] += 1
 
                 if family == "moneyline":
                     line = None
                 elif family == "total":
-                    # Basketball totals are catalogued as one market ID per line.
                     line_value = raw_line if raw_line is not None else metadata.get("handicap")
                     if line_value is None:
                         audit["unparsed_outcomes"] += 1
                         continue
                     line = round(float(line_value), 2)
                 else:
-                    # Catalogue handicap is the home-team line. If the bookmaker
-                    # embeds a side-specific line in its label, normalize it first.
                     if raw_line is not None:
                         line_value = raw_line if side == "home" else -raw_line
                     else:
