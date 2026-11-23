@@ -17,7 +17,7 @@ jobs:
         with:
           python-version: "3.11"
       - name: Check Python syntax
-        run: python -m py_compile app.py sportapi_provider.py oddspapi_provider.py
+        run: python -m py_compile app.py sportapi_provider.py oddspapi_provider.py espn_provider.py
       - name: Check inline JavaScript syntax
         run: |
           python - <<'PY'
