@@ -93,9 +93,11 @@
         <label for="sportapi-season">Temporada (según la competición)</label><input id="sportapi-season" value="2026-27" placeholder="Ej.: 2026-27">
         <label for="sportapi-date">Fecha específica (opcional)</label><input id="sportapi-date" type="date">
         <label for="sportapi-limit">Partidos finalizados</label><select id="sportapi-limit"><option value="20">20</option><option value="40">40</option><option value="100">100</option><option value="150">150</option><option value="200" selected>200</option></select>
-        <p class="small">Cada partido puede consumir hasta 2 solicitudes adicionales para estadísticas de equipos y jugadores. Máximo 200 partidos por importación (límite documentado por SportAPI.ai).</p>
-        <div class="actions"><button class="action" id="sportapi-import" type="button">Importar datos de SportAPI.ai</button><button class="action secondary" id="sportapi-fixtures" type="button">Importar calendario de la fecha</button></div>
-        <div id="sportapi-result" class="small"></div><div id="sportapi-fixtures-result" class="small"></div>
+        <p class="small">La importación individual puede incluir estadísticas de jugadores y consumir hasta 2 solicitudes por partido. Máximo 200 partidos por liga.</p>
+        <div class="actions"><button class="action" id="sportapi-import" type="button">Importar esta liga</button><button class="action secondary" id="sportapi-fixtures" type="button">Importar calendario de la fecha</button></div>
+        <div class="actions"><button class="action" id="sportapi-import-all" type="button">Importar todas las ligas disponibles</button></div>
+        <p class="small">La importación masiva recorre todas las ligas del catálogo y su temporada actual. Para cuidar la cuota, prioriza resultados y estadísticas de equipo; no descarga los box scores individuales de jugadores y se detiene antes de agotar el saldo. La muestra puede quedar parcial y no garantiza historial suficiente por equipo.</p>
+        <div id="sportapi-result" class="small"></div><div id="sportapi-all-result" class="small" aria-live="polite"></div><div id="sportapi-fixtures-result" class="small"></div>
         <p class="small">El calendario usa una sola solicitud de SportAPI.ai. No descarga box scores ni consulta HoopsAPI.</p>
       </div>
 
@@ -430,8 +432,27 @@ async function sportApiRequest(path){
   const response=await fetch(base+path,{cache:'no-store'});
   let data;
   try{data=await response.json();}catch(_){throw new Error('Respuesta inválida del servidor.');}
-  if(!response.ok)throw new Error(data.detail||('HTTP '+response.status));
+  if(!response.ok){const error=new Error(data.detail||('HTTP '+response.status));error.status=response.status;throw error;}
   return data;
+}
+async function persistSportApiData(data,refreshAfter=true){
+  const stamp=Date.now();
+  for(const row of data.games||[])await putRecord({key:'dataset:games:'+row.event_id,kind:'dataset',type:'games',data:row,created:stamp});
+  for(const row of data.team_stats||[])await putRecord({key:'dataset:team_stats:'+row.event_id+':'+row.team,kind:'dataset',type:'team_stats',data:row,created:stamp});
+  for(const row of data.player_stats||[])await putRecord({key:'dataset:player_stats:'+row.event_id+':'+row.player_id,kind:'dataset',type:'player_stats',data:row,created:stamp});
+  if(refreshAfter)await refresh();
+}
+function sportApiRemaining(quota){
+  if(!quota||typeof quota!=='object')return null;
+  const values=['daily_remaining','monthly_remaining'].map(key=>Number(quota[key])).filter(value=>Number.isFinite(value)&&value>=0);
+  return values.length?Math.min(...values):null;
+}
+function sportApiQuotaText(quota){
+  if(!quota)return 'saldo no informado por el proveedor';
+  const daily=quota.daily_remaining,monthly=quota.monthly_remaining,parts=[];
+  if(daily!==null&&daily!==undefined)parts.push('diarias '+daily);
+  if(monthly!==null&&monthly!==undefined)parts.push('mensuales '+monthly);
+  return parts.length?'solicitudes restantes: '+parts.join(' · '):'saldo no informado por el proveedor';
 }
 document.getElementById('sportapi-check').addEventListener('click',async()=>{
   try{
@@ -476,15 +497,80 @@ document.getElementById('sportapi-import').addEventListener('click',async()=>{
     output.textContent='Descargando partidos y estadísticas…';
     const query=new URLSearchParams({league,limit,...(season?{season}:{}),...(date?{date}:{})});
     const data=await sportApiRequest('/api/sportapi/sync?'+query);
-    for(const row of data.games||[])await putRecord({key:'dataset:games:'+row.event_id,kind:'dataset',type:'games',data:row,created:Date.now()});
-    for(const row of data.team_stats||[])await putRecord({key:'dataset:team_stats:'+row.event_id+':'+row.team,kind:'dataset',type:'team_stats',data:row,created:Date.now()});
-    for(const row of data.player_stats||[])await putRecord({key:'dataset:player_stats:'+row.event_id+':'+row.player_id,kind:'dataset',type:'player_stats',data:row,created:Date.now()});
-    await refresh();
+    await persistSportApiData(data);
     output.textContent='Importado: '+data.games_received+' partidos; '+data.team_stats_rows+' registros de equipos; '+data.player_stats_rows+' registros de jugadores. '+(data.warnings||[]).join(' ');
   }catch(error){output.textContent='Error: '+error.message;}
 });
 
 
+
+document.getElementById('sportapi-import-all').addEventListener('click',async()=>{
+  const button=document.getElementById('sportapi-import-all');
+  const output=document.getElementById('sportapi-all-result');
+  if(button.disabled)return;
+  button.disabled=true;
+  const originalText=button.textContent;
+  let importedLeagues=0,totalGames=0,totalTeamRows=0,statsLeagues=0,resultsOnlyLeagues=0;
+  const failures=[];
+  let quota=null,stoppedReason='';
+  try{
+    output.textContent='Consultando el catálogo completo de ligas…';
+    const catalog=await sportApiRequest('/api/sportapi/leagues');
+    const leagues=(catalog.leagues||[]).filter(item=>(item.slug||item.id)&&item.current_season)
+      .sort((a,b)=>String(a.name||a.slug||'').localeCompare(String(b.name||b.slug||''),'es'));
+    quota=catalog.quota||null;
+    if(!leagues.length)throw new Error('El proveedor no devolvió ligas con temporada actual.');
+    for(let i=0;i<leagues.length;i++){
+      const league=leagues[i],remainingLeagues=leagues.length-i;
+      const remainingCalls=sportApiRemaining(quota);
+      const reserve=remainingCalls===null?0:Math.max(60,Math.ceil(remainingCalls*0.08));
+      if(remainingCalls!==null&&remainingCalls<=reserve+1){
+        stoppedReason='Se detuvo para conservar una reserva de solicitudes de la API.';
+        break;
+      }
+      const callsPerLeague=remainingCalls===null?6:Math.floor((remainingCalls-reserve)/remainingLeagues);
+      const gameLimit=Math.max(0,Math.min(60,callsPerLeague-1));
+      if(gameLimit<1){
+        stoppedReason='El saldo restante no alcanza para continuar sin arriesgar el límite.';
+        break;
+      }
+      const slug=String(league.slug||league.id),season=String(league.current_season);
+      output.textContent=(i+1)+'/'+leagues.length+' · Importando '+(league.name||slug)+' ('+season+'), hasta '+gameLimit+' partidos recientes… · '+sportApiQuotaText(quota);
+      try{
+        const query=new URLSearchParams({league:slug,season,limit:String(gameLimit),include_players:'false'});
+        const data=await sportApiRequest('/api/sportapi/sync?'+query);
+        await persistSportApiData(data,false);
+        importedLeagues++;
+        totalGames+=Number(data.games_received||0);
+        totalTeamRows+=Number(data.team_stats_rows||0);
+        if(Number(data.team_stats_rows||0)>0)statsLeagues++;else resultsOnlyLeagues++;
+        quota=data.quota||quota;
+        if(data.rate_limited){
+          stoppedReason='SportAPI.ai indicó que se alcanzó un límite de solicitudes.';
+          break;
+        }
+      }catch(error){
+        failures.push((league.name||slug)+': '+error.message);
+        if(error.status===429||/límite|limit|429/i.test(error.message)){
+          stoppedReason='El proveedor alcanzó un límite de solicitudes; se detuvo el lote.';
+          break;
+        }
+      }
+    }
+    await refresh();
+    let summary='Importación masiva: '+importedLeagues+'/'+leagues.length+' ligas procesadas · '+totalGames+' partidos · '+totalTeamRows+' registros de estadísticas de equipos · '+statsLeagues+' ligas con estadísticas de equipo · '+resultsOnlyLeagues+' ligas solo con resultados.';
+    if(stoppedReason)summary+=' '+stoppedReason;
+    if(importedLeagues===leagues.length&&!failures.length)summary+=' Catálogo completo procesado.';
+    if(failures.length)summary+=' Errores: '+failures.slice(0,5).join(' | ')+(failures.length>5?' | y '+(failures.length-5)+' más.':'.');
+    summary+=' Cuota: '+sportApiQuotaText(quota)+'. Los registros se guardaron en este iPhone.';
+    output.textContent=summary;
+  }catch(error){
+    output.textContent='No se pudo completar la importación de todas las ligas: '+error.message;
+  }finally{
+    button.disabled=false;
+    button.textContent=originalText;
+  }
+});
 
 const sportApiFixturesMessage=document.getElementById('sportapi-fixtures-result');
 document.getElementById('sportapi-fixtures').addEventListener('click',async()=>{

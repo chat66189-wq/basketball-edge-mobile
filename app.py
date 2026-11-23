@@ -429,10 +429,16 @@ def sportapi_leagues(search: str | None = None):
 
 
 @app.get("/api/sportapi/sync")
-def sportapi_sync(league: str, season: str | None = None, date: str | None = None, limit: int = 20):
+def sportapi_sync(
+    league: str,
+    season: str | None = None,
+    date: str | None = None,
+    limit: int = 20,
+    include_players: bool = True,
+):
     try:
         from sportapi_provider import sync
-        return sync(league, season, date, limit)
+        return sync(league, season, date, limit, include_players=include_players)
     except Exception as exc:
         from sportapi_provider import SportAPIError
         if isinstance(exc, SportAPIError):

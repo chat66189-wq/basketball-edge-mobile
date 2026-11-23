@@ -89,7 +89,7 @@ def _player_rows(eid,items,team):
             "fg3m":_num(item.get("tpm")),"fta":_num(item.get("fta")),"ftm":_num(item.get("ftm"))})
     return rows
 
-def _fetch_game_boxscore(g):
+def _fetch_game_boxscore(g, include_players=True):
     """Fetch one game's team and player box scores; keep team stats if player data fails."""
     gid = g.get("id")
     home = g.get("home") or {}
@@ -119,6 +119,9 @@ def _fetch_game_boxscore(g):
         warnings.append("No se pudieron interpretar las estadísticas de equipo de un partido.")
         return team_rows, player_rows, quota, warnings, rate_limited
 
+    if not include_players:
+        return team_rows, player_rows, quota, warnings, rate_limited
+
     try:
         players = _get("basketball/games/" + str(int(gid)) + "/players", ttl=3600)
         quota = players.get("_quota") or quota
@@ -133,7 +136,7 @@ def _fetch_game_boxscore(g):
     return team_rows, player_rows, quota, warnings, rate_limited
 
 
-def sync(league,season=None,date=None,limit=20):
+def sync(league,season=None,date=None,limit=20,include_players=True):
     league=str(league or "").strip()
     if not re.fullmatch(r"[A-Za-z0-9-]{1,80}",league): raise SportAPIError("Seleccioná una competición válida.",422)
     try: limit=int(limit)
@@ -197,7 +200,7 @@ def sync(league,season=None,date=None,limit=20):
     for offset in range(0, len(boxscore_games), batch_size):
         batch = boxscore_games[offset:offset + batch_size]
         with ThreadPoolExecutor(max_workers=min(batch_size, len(batch))) as executor:
-            futures = [executor.submit(_fetch_game_boxscore, game) for game in batch]
+            futures = [executor.submit(_fetch_game_boxscore, game, include_players) for game in batch]
             for future in as_completed(futures):
                 try:
                     team_rows, player_rows, used_quota, game_warnings, hit_limit = future.result()
@@ -221,6 +224,8 @@ def sync(league,season=None,date=None,limit=20):
         "La cobertura de box scores varía por competición y partido; no se inventan datos ausentes.",
         "SportAPI.ai no ofrece cuotas de apuestas.",
     ])
+    if not include_players:
+        warnings.append("Importación masiva: se omitió el box score individual de jugadores para ahorrar solicitudes.")
     return {
         "games": games,
         "team_stats": team_stats,
@@ -230,6 +235,8 @@ def sync(league,season=None,date=None,limit=20):
         "team_stats_rows": len(team_stats),
         "player_stats_rows": len(player_stats),
         "quota": quota,
+        "player_stats_included": bool(include_players),
+        "rate_limited": bool(rate_limited),
         "warnings": list(dict.fromkeys(warnings)),
     }
 
