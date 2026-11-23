@@ -1803,7 +1803,7 @@ async def recommend_parlay(request: Request):
                 warnings.insert(
                     0,
                     "BEST_EFFORT_NOT_VALIDATED: no se encontró una combinada que cumpliera todos los filtros estrictos. "
-                    "Esta alternativa relaja solo los umbrales de probabilidad/EV; mantiene historial mínimo, "
+                    "Esta alternativa relaja los umbrales de probabilidad, edge y EV; mantiene historial mínimo, "
                     "competición y equipos coincidentes, 3 casas, dispersión máxima, cuotas recientes y control de push. "
                     "No es una recomendación validada ni una tasa de acierto demostrada."
                 )
