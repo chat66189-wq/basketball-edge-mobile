@@ -46,7 +46,7 @@ from scripts.edge_v15.market_pricing import price_game_market, ev_per_unit  # no
 app = FastAPI(
     title="Basketball Edge Analyst v20 API",
     description="Adaptador web para el motor de proyección y simulación BEA. Las salidas son exploratorias, no picks validados.",
-    version="20.1.0-mobile-bridge",
+    version="20.2.0-espn-history-conservative",
 )
 
 frontend_origin = os.environ.get("FRONTEND_ORIGIN", "https://chat66189-wq.github.io")
@@ -71,7 +71,35 @@ MAX_MARKET_DISPERSION = 0.04
 MAX_QUOTE_AGE_SECONDS = 15 * 60
 MIN_HISTORICAL_GAMES = 12
 PROBABILITY_UNCERTAINTY_HAIRCUT = 0.02
+MAX_DYNAMIC_UNCERTAINTY_ADJUSTMENT = 0.005
+MIN_PARLAY_JOINT_PROBABILITY = 0.30
 PARLAY_ODDS_TOLERANCE_FRACTION = 0.05
+
+
+def _uncertainty_haircut(
+    history_games: int,
+    bookmaker_count: int,
+    market_dispersion_pp: float,
+    quote_age_seconds: float,
+) -> tuple[float, dict[str, float]]:
+    """Transparent small risk adjustment on top of the 2pp base haircut."""
+    history_penalty = min(
+        0.0025,
+        max(0.0, (24.0 - float(history_games)) / 12.0) * 0.0025,
+    )
+    consensus_penalty = 0.001 if bookmaker_count == 2 else 0.0
+    dispersion_penalty = 0.001 * min(1.0, max(0.0, float(market_dispersion_pp)) / 4.0)
+    freshness_penalty = 0.0005 * min(
+        1.0, max(0.0, float(quote_age_seconds)) / MAX_QUOTE_AGE_SECONDS
+    )
+    adjustments = {
+        "limited_history": history_penalty,
+        "two_bookmaker_consensus": consensus_penalty,
+        "market_dispersion": dispersion_penalty,
+        "quote_age": freshness_penalty,
+    }
+    total_adjustment = min(MAX_DYNAMIC_UNCERTAINTY_ADJUSTMENT, sum(adjustments.values()))
+    return PROBABILITY_UNCERTAINTY_HAIRCUT + total_adjustment, adjustments
 
 # Best-effort is a visibly weaker fallback, never a substitute for strict screening.
 BEST_EFFORT_MIN_RAW_MODEL_PROBABILITY = 0.60
@@ -463,6 +491,28 @@ def sportapi_fixtures(league: str, date: str, limit: int = 80):
         if isinstance(exc, SportAPIError):
             raise HTTPException(status_code=exc.status, detail=str(exc))
         raise HTTPException(status_code=500, detail="sportapi_fixtures_failed")
+
+@app.get("/api/espn/status")
+def espn_status():
+    from espn_provider import status
+    return status()
+
+
+@app.get("/api/espn/history-sync")
+async def espn_history_sync(
+    competitions: str,
+    days: int = 400,
+    max_games_per_league: int = 220,
+):
+    try:
+        from espn_provider import sync, ESPNError
+        return await run_in_threadpool(sync, competitions, days, max_games_per_league)
+    except Exception as exc:
+        from espn_provider import ESPNError
+        if isinstance(exc, ESPNError):
+            raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
+        raise HTTPException(status_code=500, detail="espn_history_sync_failed") from exc
+
 
 
 
@@ -973,9 +1023,26 @@ def _score_fixture(fixture: dict, all_games: list[dict], all_stats: list[dict],
                 else (values[mid - 1] + values[mid]) / 2.0
             )
             market_ranges_pp[fair_side] = (values[-1] - values[0]) * 100.0
-        if manual_groups is None and max(market_ranges_pp.values(), default=0.0) > MAX_MARKET_DISPERSION * 100.0:
+        max_dispersion_pp = max(market_ranges_pp.values(), default=0.0)
+        if manual_groups is None and max_dispersion_pp > MAX_MARKET_DISPERSION * 100.0:
             reject("market_dispersion_over_4pp")
             continue
+
+        quote_ages = []
+        for quote in quotes:
+            try:
+                quote_ages.append(
+                    max(0.0, (now - _aware_datetime(quote["captured_at"], "captured_at")).total_seconds())
+                )
+            except (KeyError, ValueError, TypeError):
+                continue
+        max_quote_age_seconds = max(quote_ages, default=0.0)
+        effective_haircut, haircut_adjustments = _uncertainty_haircut(
+            min(home_rates.games, away_rates.games),
+            bookmaker_count,
+            max_dispersion_pp,
+            max_quote_age_seconds,
+        )
 
         for side in sides:
             try:
@@ -1013,7 +1080,7 @@ def _score_fixture(fixture: dict, all_games: list[dict], all_stats: list[dict],
                 continue
 
             blended = fair[side] + shrink * (raw_conditional - fair[side])
-            conservative_probability = max(0.0, blended - PROBABILITY_UNCERTAINTY_HAIRCUT)
+            conservative_probability = max(0.0, blended - effective_haircut)
             if conservative_probability < conservative_minimum:
                 reject("best_effort_conservative_probability_below_58pct" if relaxed else "conservative_probability_below_70pct")
                 continue
@@ -1079,7 +1146,13 @@ def _score_fixture(fixture: dict, all_games: list[dict], all_stats: list[dict],
                     "market_consensus_bookmakers": bookmaker_count,
                     "market_probability_range_pp": market_ranges_pp[side],
                     "model_market_gap_pp": model_market_gap * 100.0,
-                    "probability_uncertainty_haircut_pp": PROBABILITY_UNCERTAINTY_HAIRCUT * 100.0,
+                    "probability_uncertainty_haircut_pp": effective_haircut * 100.0,
+                    "probability_uncertainty_adjustments_pp": {
+                        key: value * 100.0 for key, value in haircut_adjustments.items()
+                    },
+                    "market_dispersion_max_pp": max_dispersion_pp,
+                    "quote_age_max_seconds": max_quote_age_seconds,
+                    "model_weight": shrink,
                     "projected_home_points": projection.home_points_mean,
                     "projected_away_points": projection.away_points_mean,
                     "projected_total_points": projection.home_points_mean + projection.away_points_mean,
@@ -1763,6 +1836,8 @@ async def recommend_parlay(request: Request):
                         if combined_odds < target_min - 1e-9 or combined_odds > target_max + 1e-9:
                             continue
                         hit_probability = math.prod(x["probability"] for x in combo)
+                        if hit_probability < MIN_PARLAY_JOINT_PROBABILITY:
+                            continue
                         rank = _parlay_rank(hit_probability, combined_odds, target_odds, leg_count)
                         if local_best is None or rank > local_best["rank"]:
                             local_best = {
@@ -1775,6 +1850,8 @@ async def recommend_parlay(request: Request):
                                 "odds_deviation": combined_odds - target_odds,
                                 "odds_deviation_percent": ((combined_odds / target_odds) - 1.0) * 100.0,
                                 "estimated_hit_probability": hit_probability,
+                                "minimum_joint_probability": MIN_PARLAY_JOINT_PROBABILITY,
+                                "joint_probability_method": "product_of_leg_estimates_assuming_approximate_independence",
                                 "legs": list(combo),
                             }
                 if local_best and (best is None or local_best["rank"] > best["rank"]):
@@ -1801,11 +1878,11 @@ async def recommend_parlay(request: Request):
         warnings = [
             "EXPLORATORY_NOT_VALIDATED: el modelo no tiene validación walk-forward/holdout aprobada; el 70% no está calibrado ni es una tasa de acierto demostrada.",
             ("El modelo simula prórrogas de forma aproximada para mercados que las incluyen; no equivale a una liquidación oficial exacta." if provider_name == "OddsPapi" else "El modelo base simula tiempo reglamentario; las cuotas FT de HoopsAPI incluyen prórroga. La comparación de probabilidades no es perfectamente equivalente."),
-            "Filtro reforzado: cada pierna debe superar 70% tras un descuento de incertidumbre de 2 puntos; exige simulación bruta >=72%, mercado sin margen >=60% y brecha modelo-mercado <=12 puntos porcentuales.",
+            "Filtro reforzado: cada pierna debe superar 70% conservador; parte de un descuento base de 2 pp y suma ajustes transparentes de hasta 0,5 pp por muestra corta, consenso de solo 2 casas, dispersión y antigüedad de cuota. Exige simulación bruta >=72%, mercado sin margen >=60% y brecha modelo-mercado <=12 pp.",
             "El análisis automático exige precios emparejados de al menos 2 casas y dispersión máxima de 4 puntos porcentuales entre ellas.",
             "Se exigen al menos 12 partidos históricos completos por equipo y cuotas capturadas en los últimos 15 minutos.",
             "La combinada se busca dentro de una banda de +/-5% de la cuota objetivo; puede quedar ligeramente por debajo o por encima, pero no fuera de ese rango.",
-            "La probabilidad combinada multiplica las probabilidades de las piernas y supone independencia aproximada entre partidos; no estima correlaciones.",
+            "La combinada exige una probabilidad conjunta estimada mínima del 30%. El cálculo multiplica probabilidades por pierna y sigue suponiendo independencia aproximada: no es una probabilidad conjunta calibrada ni un límite garantizado.",
             "El motor actual no incorpora de forma fiable lesiones, titulares confirmados, minutos esperados, descanso ni viajes; los cambios de plantel no están modelados.",
             "El motor se apoya principalmente en puntos y posesiones; todavía no aprovecha de forma completa tiro, rebotes, pérdidas ni métricas de jugadores.",
             "Solo se analizan competiciones y equipos con estadísticas históricas locales suficientes; no se inventan datos faltantes.",
@@ -1851,8 +1928,8 @@ async def recommend_parlay(request: Request):
                     warnings.append(
                         f"Falta historial en {label}: {info['teams_total']} equipos, el más completo tiene "
                         f"{info['max_games_for_one_team']}/{minimum_history} partidos con box score. "
-                        f"Importá unos {info['estimated_games_to_import']} partidos más (Importar desde SportAPI.ai) "
-                        "y volvé a buscar."
+                        f"Necesita aproximadamente {info['estimated_games_to_import']} partidos completos más desde una fuente compatible de box scores. "
+                        "El importador alternativo intentará cubrir las ligas públicas disponibles; las demás pueden requerir CSV."
                     )
         if not modelable_competition_labels:
             warnings.append(
@@ -1941,6 +2018,9 @@ async def recommend_parlay(request: Request):
                 "minimum_market_probability": MIN_MARKET_PROBABILITY,
                 "maximum_model_market_gap_pp": MAX_MODEL_MARKET_GAP * 100.0,
                 "minimum_automatic_bookmaker_consensus": MIN_AUTOMATIC_BOOKMAKER_CONSENSUS,
+                "minimum_joint_parlay_probability": MIN_PARLAY_JOINT_PROBABILITY,
+                "base_uncertainty_haircut_pp": PROBABILITY_UNCERTAINTY_HAIRCUT * 100.0,
+                "maximum_dynamic_uncertainty_adjustment_pp": MAX_DYNAMIC_UNCERTAINTY_ADJUSTMENT * 100.0,
                 "maximum_market_dispersion_pp": MAX_MARKET_DISPERSION * 100.0,
                 "maximum_quote_age_minutes": MAX_QUOTE_AGE_SECONDS / 60.0,
                 "uncertainty_haircut_pp": PROBABILITY_UNCERTAINTY_HAIRCUT * 100.0,
