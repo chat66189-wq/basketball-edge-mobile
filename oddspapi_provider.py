@@ -754,7 +754,8 @@ def games(
             "odds_data_audit": {
                 "bookmaker_boards": 0, "active_bookmaker_boards": 0,
                 "recognized_market_instances": 0, "active_prices": 0,
-                "fresh_prices": 0, "parsed_outcomes": 0, "unparsed_outcomes": 0,
+                "fresh_prices": 0, "parsed_outcomes": 0, "outcomes_mapped_by_catalogue": 0,
+                "outcomes_mapped_by_position": 0, "unparsed_outcomes": 0,
                 "stale_prices": 0, "incomplete_bookmaker_market_pairs": 0,
                 "paired_quotes": 0, "normalized_market_groups": 0,
             },
@@ -764,8 +765,8 @@ def games(
     normalized = []
     audit_fields = (
         "bookmaker_boards", "active_bookmaker_boards", "recognized_market_instances",
-        "active_prices", "fresh_prices", "parsed_outcomes", "unparsed_outcomes",
-        "stale_prices", "incomplete_bookmaker_market_pairs", "paired_quotes",
+        "active_prices", "fresh_prices", "parsed_outcomes", "outcomes_mapped_by_catalogue",
+        "outcomes_mapped_by_position", "unparsed_outcomes", "stale_prices", "incomplete_bookmaker_market_pairs", "paired_quotes",
         "normalized_market_groups",
     )
     odds_data_audit = {key: 0 for key in audit_fields}
