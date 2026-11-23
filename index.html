@@ -136,7 +136,7 @@
       </div>
 
       <div class="panel"><h2>Combinada automática · competiciones con historial compatible</h2>
-        <p class="small">La búsqueda consulta automáticamente los partidos con cuotas de las competiciones que ya tienen historial suficiente en este iPhone. OddsPapi tiene prioridad cuando su clave está configurada en Render; HoopsAPI queda como alternativa. No se mezclan ligas sin historial ni se inventan estadísticas.</p>
+        <p class="small">La búsqueda consulta automáticamente los partidos con cuotas. Cuando no encuentra ligas compatibles, intenta importar desde SportAPI.ai el historial faltante solo para las competiciones detectadas en ese calendario y repite el análisis. La importación consume solicitudes de SportAPI.ai y conserva los datos existentes. El filtro estricto del 70% permanece activo por defecto.</p>
         <p class="small"><a href="https://hoopsapi.com/sign-up" target="_blank" rel="noopener noreferrer">Crear clave gratuita de HoopsAPI</a> · El plan gratuito publica 10 consultas por día.</p>
         <div id="hoopsapi-status" class="fileline" aria-live="polite">Comprobando configuración de cuotas…</div>
         <div class="grid">
@@ -145,7 +145,7 @@
         </div>
         <label for="parlay-target">Cuota total objetivo</label><input id="parlay-target" type="number" min="1.01" max="100" step="0.01" value="4.00" required>
         <label class="small" style="display:flex;gap:8px;align-items:center"><input id="best-effort-mode" type="checkbox"> Permitir mejor esfuerzo exploratorio (puede aceptar picks inferiores al 70%; desactivado por defecto)</label>
-        <div class="actions"><button class="action" type="button" id="preview-local">Analizar candidatos localmente (sin cuotas)</button><button class="action secondary" type="button" id="check-hoopsapi">Comprobar proveedor de cuotas</button><button class="action" type="button" id="build-parlay">Buscar mejores picks y armar combinada automática</button><button class="action" type="button" id="build-bookmaker-parlay">Buscar picks y combinada con cuotas guardadas de esta casa</button><button class="action secondary" type="button" id="run-backtest">Medir acierto real del modelo (backtest)</button></div><div id="backtest-result" class="small"></div>
+        <div class="actions"><button class="action" type="button" id="preview-local">Analizar candidatos localmente (sin cuotas)</button><button class="action secondary" type="button" id="check-hoopsapi">Comprobar proveedor de cuotas</button><button class="action" type="button" id="build-parlay">Buscar combinada · completar historial automáticamente</button><button class="action" type="button" id="build-bookmaker-parlay">Buscar picks y combinada con cuotas guardadas de esta casa</button><button class="action secondary" type="button" id="run-backtest">Medir acierto real del modelo (backtest)</button></div><div id="backtest-result" class="small"></div>
         <div id="parlay-message" class="fileline" aria-live="polite"></div>
         <div id="parlay-result"></div>
       </div>
@@ -704,6 +704,7 @@ async function autoTopUpHistoryForFixtures(analysis){
  const reserve=Math.max(10,Math.ceil(remaining*0.02));
  let available=remaining;
  const importedLabels=[];
+ localStorage.setItem('bea-v20-auto-history-attempt',String(Date.now()));
  for(let i=0;i<ordered.length;i++){
   const item=ordered[i];
   const current=sportApiRemaining(quota);
