@@ -644,8 +644,7 @@ function autoCompetitionKey(value){
  if(label.includes('euroleague'))return 'euroleague'+gender;
  if(label.includes('eurocup'))return 'eurocup'+gender;
  if(label.includes('ncaa')){
-  const ncaaGender=(label.includes('women')||label.includes('female')||label.endsWith('ncaaw')||label.endsWith('ncaadiw')||label.endsWith('ncaad1w')||label.endsWith('ncaadivisioniw'))?'women':
-   (label.includes('men')||label.includes('male')||label.endsWith('ncaam')||label.endsWith('ncaadim')||label.endsWith('ncaad1m')||label.endsWith('ncaadivisionim'))?'men':'men';
+  const ncaaGender=(label.includes('women')||label.includes('female')||label.endsWith('ncaaw')||label.endsWith('ncaadiw')||label.endsWith('ncaad1w')||label.endsWith('ncaadivisioniw'))?'women':'men';
   if(ncaaGender){
    const division=(label.includes('divisioniii')||label.includes('division3')||label.includes('diviii')||label.includes('div3')||label.includes('ncaa3'))?'3':
     (label.includes('divisionii')||label.includes('division2')||label.includes('divii')||label.includes('div2')||label.includes('ncaa2'))?'2':'1';
