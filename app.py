@@ -1828,6 +1828,7 @@ async def recommend_parlay(request: Request):
             "odds_scan_cap": feed.get("scan_cap") if provider_name == "OddsPapi" else None,
             "odds_competitions_matched": feed.get("matching_competitions") if provider_name == "OddsPapi" else None,
             "odds_markets_catalog_loaded": feed.get("markets_catalog_loaded") if provider_name == "OddsPapi" else None,
+            "odds_data_audit": feed.get("odds_data_audit") if provider_name == "OddsPapi" else None,
         }
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
