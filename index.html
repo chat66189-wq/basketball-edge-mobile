@@ -96,7 +96,7 @@
         <p class="small">La importación individual puede incluir estadísticas de jugadores y consumir hasta 2 solicitudes por partido. Máximo 200 partidos por liga.</p>
         <div class="actions"><button class="action" id="sportapi-import" type="button">Importar esta liga</button><button class="action secondary" id="sportapi-fixtures" type="button">Importar calendario de la fecha</button></div>
         <div class="actions"><button class="action" id="sportapi-import-all" type="button">Importar todas las ligas disponibles</button></div>
-        <p class="small">La importación masiva recorre todas las ligas del catálogo y su temporada actual. Para cuidar la cuota, prioriza resultados y estadísticas de equipo; no descarga los box scores individuales de jugadores y se detiene antes de agotar el saldo. La muestra puede quedar parcial y no garantiza historial suficiente por equipo.</p>
+        <p class="small">La importación masiva recorre todas las ligas del catálogo y descarga hasta 200 partidos recientes por liga, incluyendo temporadas anteriores. Prioriza NBA, EuroLeague, EuroCup, NBL y WNBA; después reparte el saldo entre las demás. Para cuidar la cuota, no descarga box scores individuales de jugadores, conserva una reserva de solicitudes y guarda los registros sin duplicar ni borrar los anteriores.</p>
         <div id="sportapi-result" class="small"></div><div id="sportapi-all-result" class="small" aria-live="polite"></div><div id="sportapi-fixtures-result" class="small"></div>
         <p class="small">El calendario usa una sola solicitud de SportAPI.ai. No descarga box scores ni consulta HoopsAPI.</p>
       </div>
@@ -518,28 +518,49 @@ document.getElementById('sportapi-import-all').addEventListener('click',async()=
   try{
     output.textContent='Consultando el catálogo completo de ligas…';
     const catalog=await sportApiRequest('/api/sportapi/leagues');
-    const leagues=(catalog.leagues||[]).filter(item=>(item.slug||item.id)&&item.current_season)
-      .sort((a,b)=>String(a.name||a.slug||'').localeCompare(String(b.name||b.slug||''),'es'));
+    const leagues=(catalog.leagues||[]).filter(item=>(item.slug||item.id)&&item.current_season);
+    const priority=(item)=>{
+      const key=String((item.slug||'')+' '+(item.name||'')+' '+(item.short_name||'')).toLowerCase();
+      if(/\\bnba\\b/.test(key)&&!key.includes('g league'))return 0;
+      if(key.includes('euroleague'))return 1;
+      if(key.includes('eurocup'))return 2;
+      if(/\\bnbl\\b/.test(key)||key.includes('national basketball league'))return 3;
+      if(key.includes('wnba'))return 4;
+      if(key.includes('ncaa')&&(/women|female/.test(key)))return 5;
+      if(key.includes('ncaa'))return 6;
+      if(key.includes('g league')||key.includes('gleague'))return 7;
+      return 8;
+    };
+    leagues.sort((a,b)=>priority(a)-priority(b)||String(a.name||a.slug||'').localeCompare(String(b.name||b.slug||''),'es'));
     quota=catalog.quota||null;
     if(!leagues.length)throw new Error('El proveedor no devolvió ligas con temporada actual.');
+    const initialRemaining=sportApiRemaining(quota);
+    const reserve=initialRemaining===null?0:Math.max(80,Math.ceil(initialRemaining*0.08));
+    let callsAvailable=initialRemaining===null?leagues.length*6:Math.max(0,initialRemaining-reserve);
     for(let i=0;i<leagues.length;i++){
       const league=leagues[i],remainingLeagues=leagues.length-i;
       const remainingCalls=sportApiRemaining(quota);
-      const reserve=remainingCalls===null?0:Math.max(60,Math.ceil(remainingCalls*0.08));
       if(remainingCalls!==null&&remainingCalls<=reserve+1){
         stoppedReason='Se detuvo para conservar una reserva de solicitudes de la API.';
         break;
       }
-      const callsPerLeague=remainingCalls===null?6:Math.floor((remainingCalls-reserve)/remainingLeagues);
-      const gameLimit=Math.max(0,Math.min(60,callsPerLeague-1));
+      if(remainingCalls!==null)callsAvailable=Math.min(callsAvailable,Math.max(0,remainingCalls-reserve));
+      const isPriority=initialRemaining!==null&&priority(league)<5;
+      const reserveForLater=remainingCalls===null?0:Math.max(0,remainingLeagues-1);
+      const allowedCalls=isPriority
+        ?Math.min(201,Math.max(0,callsAvailable-reserveForLater))
+        :Math.floor(callsAvailable/remainingLeagues);
+      const gameLimit=Math.max(0,Math.min(200,allowedCalls-1));
       if(gameLimit<1){
         stoppedReason='El saldo restante no alcanza para continuar sin arriesgar el límite.';
         break;
       }
-      const slug=String(league.slug||league.id),season=String(league.current_season);
-      output.textContent=(i+1)+'/'+leagues.length+' · Importando '+(league.name||slug)+' ('+season+'), hasta '+gameLimit+' partidos recientes… · '+sportApiQuotaText(quota);
+      const slug=String(league.slug||league.id);
+      output.textContent=(i+1)+'/'+leagues.length+' · Importando '+(league.name||slug)+' · últimas temporadas disponibles, hasta '+gameLimit+' partidos… · '+sportApiQuotaText(quota);
       try{
-        const query=new URLSearchParams({league:slug,season,limit:String(gameLimit),include_players:'false'});
+        // Omitting season imports recent completed games across seasons;
+        // the model then applies its own rolling 400-day history window.
+        const query=new URLSearchParams({league:slug,limit:String(gameLimit),include_players:'false'});
         const data=await sportApiRequest('/api/sportapi/sync?'+query);
         await persistSportApiData(data,false);
         importedLeagues++;
@@ -547,6 +568,7 @@ document.getElementById('sportapi-import-all').addEventListener('click',async()=
         totalTeamRows+=Number(data.team_stats_rows||0);
         if(Number(data.team_stats_rows||0)>0)statsLeagues++;else resultsOnlyLeagues++;
         quota=data.quota||quota;
+        callsAvailable=Math.max(0,callsAvailable-1-gameLimit);
         if(data.rate_limited){
           stoppedReason='SportAPI.ai indicó que se alcanzó un límite de solicitudes.';
           break;
@@ -557,10 +579,11 @@ document.getElementById('sportapi-import-all').addEventListener('click',async()=
           stoppedReason='El proveedor alcanzó un límite de solicitudes; se detuvo el lote.';
           break;
         }
+        callsAvailable=Math.max(0,callsAvailable-1);
       }
     }
     await refresh();
-    let summary='Importación masiva: '+importedLeagues+'/'+leagues.length+' ligas procesadas · '+totalGames+' partidos · '+totalTeamRows+' registros de estadísticas de equipos · '+statsLeagues+' ligas con estadísticas de equipo · '+resultsOnlyLeagues+' ligas solo con resultados.';
+    let summary='Importación ampliada (varias temporadas): '+importedLeagues+'/'+leagues.length+' ligas procesadas · '+totalGames+' partidos · '+totalTeamRows+' registros de estadísticas de equipos · '+statsLeagues+' ligas con estadísticas de equipo · '+resultsOnlyLeagues+' ligas solo con resultados.';
     if(stoppedReason)summary+=' '+stoppedReason;
     if(importedLeagues===leagues.length&&!failures.length)summary+=' Catálogo completo procesado.';
     if(failures.length)summary+=' Errores: '+failures.slice(0,5).join(' | ')+(failures.length>5?' | y '+(failures.length-5)+' más.':'.');
