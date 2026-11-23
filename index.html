@@ -789,6 +789,7 @@ document.getElementById('build-parlay').addEventListener('click',async()=>{
    '<p>Filas locales: '+Number(data.local_games_count||0)+' partidos · '+Number(data.local_team_stats_count||0)+' registros de equipo.</p>'+
    '<p>Competiciones importadas: '+(data.imported_competitions||[]).map(safe).join(' / ')+'</p>'+
    '<p>Competiciones con historial suficiente: '+(data.modelable_competitions||[]).map(safe).join(' / ')+'</p>'+
+   '<p>Auditoría por liga: '+Object.entries(data.competition_history_audit||{}).map(([k,v])=>safe(k)+' ('+Number(v.complete_games||0)+' partidos completos; '+Number(v.teams_with_minimum_history||0)+' equipos con muestra suficiente)').join(' / ')+'</p>'+
    '<p>Partidos de la fuente con competición compatible con el historial: '+Number(data.matches_matching_imported_competitions||0)+'</p>'+
    '<p>Competiciones revisadas: '+(data.fixture_competitions_scanned||[]).map(safe).join(' / ')+'</p>'+
    '<p>Competiciones detectadas en la ventana: '+(data.fixture_competitions_in_window||[]).map(safe).join(' / ')+'</p>'+
