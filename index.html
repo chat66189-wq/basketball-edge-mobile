@@ -669,13 +669,23 @@ function autoCompetitionKey(value){
 }
 async function autoTopUpHistoryForFixtures(analysis){
  const message=document.getElementById('parlay-message');
- const now=Date.now(),lastAttempt=Number(localStorage.getItem('bea-v20-auto-history-attempt')||0);
- if(now-lastAttempt<6*60*60*1000)return {teamStatsRows:0,summary:'No se repitió la actualización automática: ya se intentó en las últimas 6 horas.'};
- message.textContent='Hay competiciones de la ventana sin historial suficiente. Revisando el catálogo de SportAPI.ai para completar esas ligas…';
+ message.textContent='Hay competiciones de la ventana sin historial suficiente. Revisando el saldo de SportAPI.ai y priorizando las ligas que requieren menos partidos para alcanzar la muestra mínima…';
+ // Read the live quota on every run. A fixed six-hour lock could block a retry
+ // immediately after SportAPI.ai resets its daily allowance.
  const status=await sportApiRequest('/api/sportapi/status');
  const remaining=sportApiRemaining(status.quota);
  if(remaining===null)throw new Error('SportAPI.ai no informó el saldo de solicitudes; no se inició una importación automática para evitar consumir cuota sin control.');
- if(remaining<=12)throw new Error('SportAPI.ai tiene solo '+remaining+' solicitudes disponibles; se conserva una reserva y no alcanza para completar historial.');
+ const reserve=Math.max(10,Math.ceil(remaining*0.02));
+ if(remaining<=reserve+1){
+  const modelableKeys=new Set((analysis.modelable_competitions||[]).map(autoCompetitionKey));
+  const audit=analysis.competition_history_audit||{};
+  const pending=(analysis.fixture_competitions_in_window||[])
+   .map(label=>({label,key:autoCompetitionKey(label),history:audit[autoCompetitionKey(label)]||{}}))
+   .filter(item=>item.key&&!modelableKeys.has(item.key))
+   .sort((a,b)=>(Number(a.history.estimated_games_to_import||999999)-Number(b.history.estimated_games_to_import||999999)))
+   .map(item=>item.label);
+  return {teamStatsRows:0,summary:'Actualización automática pausada: SportAPI.ai tiene '+remaining+' solicitudes disponibles en el límite más restrictivo y se conserva una reserva de '+reserve+'. No se consumió el saldo restante. Ligas pendientes, priorizadas por menor historial faltante: '+pending.slice(0,5).join(', ')+'. La próxima búsqueda retomará la importación cuando el proveedor renueve el cupo diario. '+sportApiQuotaText(status.quota)+'.'};
+ }
  const catalogue=await sportApiRequest('/api/sportapi/leagues');
  const allLeagues=(catalogue.leagues||[]).filter(item=>(item.slug||item.id)&&item.box_scores!==false);
  const modelableKeys=new Set((analysis.modelable_competitions||[]).map(autoCompetitionKey));
@@ -696,37 +706,51 @@ async function autoTopUpHistoryForFixtures(analysis){
   if(targets.has(slug))continue;
   const estimated=Number(history.estimated_games_to_import||0);
   const desired=Math.min(200,estimated>0?Math.max(40,estimated+8):120);
-  targets.set(slug,{league,key,label,desired,priority:key==='nba'?0:key==='ncaadivision1women'?1:key==='ncaadivision1men'?2:key==='euroleague'?3:key==='eurocup'?4:key==='nbl'?5:key==='wnba'?6:7});
+  targets.set(slug,{league,key,label,desired,estimated,
+   maxTeamGames:Number(history.max_games_for_one_team||0)});
  }
- const ordered=[...targets.values()].sort((a,b)=>a.priority-b.priority||a.label.localeCompare(b.label));
+ const ordered=[...targets.values()].sort((a,b)=>{
+  const aCost=a.estimated>0?a.estimated:Number.MAX_SAFE_INTEGER;
+  const bCost=b.estimated>0?b.estimated:Number.MAX_SAFE_INTEGER;
+  return aCost-bCost||b.maxTeamGames-a.maxTeamGames||a.label.localeCompare(b.label);
+ });
  if(!ordered.length)throw new Error('SportAPI.ai no ofreció box scores para las competiciones sin historial detectadas: '+fixtures.join(', ')+'.');
- let quota=status.quota||catalogue.quota||null, importedLeagues=0,totalGames=0,totalTeamRows=0,resultsOnly=0;
- const reserve=Math.max(10,Math.ceil(remaining*0.02));
+ let quota=status.quota||catalogue.quota||null,importedLeagues=0,totalGames=0,totalTeamRows=0,resultsOnly=0;
  let available=remaining;
- const importedLabels=[];
- localStorage.setItem('bea-v20-auto-history-attempt',String(Date.now()));
+ const importedLabels=[],attemptedSlugs=new Set();
+ let stoppedReason='';
  for(let i=0;i<ordered.length;i++){
   const item=ordered[i];
   const current=sportApiRemaining(quota);
   if(current!==null)available=Math.min(available,current);
   const limit=Math.max(0,Math.min(item.desired,200,available-reserve-1));
-  if(limit<1)break;
-  message.textContent='Completando historial automáticamente · '+(i+1)+'/'+ordered.length+' · '+(item.league.name||item.label)+' · hasta '+limit+' partidos · '+sportApiQuotaText(quota);
-  const query=new URLSearchParams({league:String(item.league.slug||item.league.id),limit:String(limit),include_players:'false'});
+  if(limit<1){
+   stoppedReason='Se pausó antes de la siguiente liga porque el saldo diario restante debe conservarse.';
+   break;
+  }
+  const slug=String(item.league.slug||item.league.id);
+  message.textContent='Completando historial automáticamente · '+(i+1)+'/'+ordered.length+' · '+(item.league.name||item.label)+' · faltan aproximadamente '+(item.estimated||'datos por determinar')+' partidos completos · hasta '+limit+' partidos en esta tanda · '+sportApiQuotaText(quota);
+  const query=new URLSearchParams({league:slug,limit:String(limit),include_players:'false'});
   const imported=await sportApiRequest('/api/sportapi/sync?'+query);
   await persistSportApiData(imported,false);
+  attemptedSlugs.add(slug);
   importedLeagues++;
   totalGames+=Number(imported.games_received||0);
   totalTeamRows+=Number(imported.team_stats_rows||0);
   if(!Number(imported.team_stats_rows||0))resultsOnly++;
   importedLabels.push(String(item.league.name||item.label));
   quota=imported.quota||quota;
-  available=Math.max(0,available-1-Number(imported.games_received||limit));
-  if(imported.rate_limited)break;
+  const reportedRemaining=sportApiRemaining(quota);
+  available=Math.max(0,Math.min(available-1-Number(imported.games_received||limit),
+   reportedRemaining===null?Number.MAX_SAFE_INTEGER:reportedRemaining));
+  if(imported.rate_limited){
+   stoppedReason='SportAPI.ai alcanzó el límite diario; la importación se reanudará con el próximo cupo.';
+   break;
+  }
  }
  await refresh();
- localStorage.setItem('bea-v20-auto-history-attempt',String(Date.now()));
- const summary='Actualización automática del historial: '+importedLeagues+' ligas · '+totalGames+' partidos · '+totalTeamRows+' registros de equipo'+(resultsOnly?' · '+resultsOnly+' ligas sin box scores completos':'')+(importedLabels.length?' · '+importedLabels.join(', '):'')+'. '+(quota?'Cuota: '+sportApiQuotaText(quota)+'.':'');
+ const deferred=ordered.filter(item=>!attemptedSlugs.has(String(item.league.slug||item.league.id)));
+ const summary='Actualización automática del historial: '+importedLeagues+' ligas · '+totalGames+' partidos · '+totalTeamRows+' registros de equipo'+(resultsOnly?' · '+resultsOnly+' ligas sin box scores completos':'')+(importedLabels.length?' · '+importedLabels.join(', '):'')+'. '+(deferred.length?'Siguientes ligas pendientes, ordenadas por menor historial faltante: '+deferred.slice(0,5).map(item=>item.label+' ('+(item.estimated||'sin estimación')+')').join(', ')+'. ':'')+(stoppedReason?stoppedReason+' ':'')+(quota?'Cuota: '+sportApiQuotaText(quota)+'.':'');
  return {teamStatsRows:totalTeamRows,summary};
 }
 
