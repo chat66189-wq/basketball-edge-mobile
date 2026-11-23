@@ -645,13 +645,14 @@ function autoCompetitionKey(value){
  if(label.includes('eurocup'))return 'eurocup'+gender;
  if(label.includes('ncaa')){
   const ncaaGender=(label.includes('women')||label.includes('female')||label.endsWith('ncaaw')||label.endsWith('ncaadiw')||label.endsWith('ncaad1w')||label.endsWith('ncaadivisioniw'))?'women':
-   (label.includes('men')||label.includes('male')||label.endsWith('ncaam')||label.endsWith('ncaadim')||label.endsWith('ncaad1m')||label.endsWith('ncaadivisionim'))?'men':'';
+   (label.includes('men')||label.includes('male')||label.endsWith('ncaam')||label.endsWith('ncaadim')||label.endsWith('ncaad1m')||label.endsWith('ncaadivisionim'))?'men':'men';
   if(ncaaGender){
    const division=(label.includes('divisioniii')||label.includes('division3')||label.includes('diviii')||label.includes('div3')||label.includes('ncaa3'))?'3':
     (label.includes('divisionii')||label.includes('division2')||label.includes('divii')||label.includes('div2')||label.includes('ncaa2'))?'2':'1';
    return 'ncaadivision'+division+ncaaGender;
   }
  }
+ if(label.startsWith('nbagleague'))return 'nbagleague'+(label.includes('women')||label.includes('female')?'women':'');
  if(['nba','nbamen','nationalbasketballassociation','nationalbasketballassociationmen'].includes(label))return 'nba';
  if(label.startsWith('nba')&&!['nbagleague','nbawomen','nbasummer','nbacalifornia','nbautah','nbasaltlake','nbapreseason'].some(prefix=>label.startsWith(prefix))&&!label.includes('summerleague')&&!label.includes('classic'))return 'nba';
  if(['nbl','nblmen','nationalbasketballleague','nationalbasketballleaguemen','australianbl','australiannationalbasketballleague','nationalbasketballleagueaustralia'].includes(label))return 'nbl';
@@ -671,7 +672,7 @@ async function autoTopUpHistoryForFixtures(analysis){
  const message=document.getElementById('parlay-message');
  const now=Date.now(),lastAttempt=Number(localStorage.getItem('bea-v20-auto-history-attempt')||0);
  if(now-lastAttempt<6*60*60*1000)return {teamStatsRows:0,summary:'No se repitió la actualización automática: ya se intentó en las últimas 6 horas.'};
- message.textContent='No hay partidos compatibles. Revisando el catálogo de SportAPI.ai para completar solo las ligas del calendario…';
+ message.textContent='Hay competiciones de la ventana sin historial suficiente. Revisando el catálogo de SportAPI.ai para completar esas ligas…';
  const status=await sportApiRequest('/api/sportapi/status');
  const remaining=sportApiRemaining(status.quota);
  if(remaining===null)throw new Error('SportAPI.ai no informó el saldo de solicitudes; no se inició una importación automática para evitar consumir cuota sin control.');
