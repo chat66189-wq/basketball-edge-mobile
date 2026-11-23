@@ -782,6 +782,8 @@ document.getElementById('build-parlay').addEventListener('click',async()=>{
   if(!response.ok)throw new Error(data.detail||('HTTP '+response.status));
   lastRecommendation=data;
   const stats='<p>Partidos con cuotas en la ventana: '+data.matches_in_window+' · Competiciones compatibles: '+Number(data.matches_matching_imported_competitions||0)+' · Analizados: '+data.matches_analysed+' · Picks que superan filtros: '+data.eligible_market_selections+'</p><p><strong>Filtros:</strong> '+pct(data.minimum_estimated_leg_probability)+' mínimo conservador · '+Number(data.minimum_history_games||12)+' partidos históricos por equipo · cuotas recientes y consenso de al menos 3 casas.</p>';
+  const filterLabels={market_groups_seen:'grupos de mercados encontrados',no_paired_market_prices:'mercados sin precios emparejados',fewer_than_3_bookmakers:'mercados con menos de 3 casas',market_dispersion_over_4pp:'mercados con dispersión mayor a 4 pp',push_probability_over_0_5pp:'selecciones con probabilidad de devolución alta',model_probability_below_72pct:'probabilidad bruta menor al 72%',no_vig_market_probability_below_60pct:'probabilidad de mercado menor al 60%',model_market_gap_over_12pp:'diferencia modelo-mercado mayor a 12 pp',conservative_probability_below_70pct:'probabilidad conservadora menor al 70%',edge_or_expected_value_not_positive_enough:'ventaja o valor esperado insuficiente',selections_passing_all_filters:'selecciones que pasan todos los filtros'};
+  const filterAudit='<p><strong>Motivos de descarte:</strong> '+(Object.entries(data.filter_diagnostics||{}).map(([k,v])=>safe(filterLabels[k]||k)+': '+Number(v)).join(' · ')||'No se registraron mercados evaluables')+'</p>';
   const skips=data.skipped&&Object.keys(data.skipped).length?'<p class="small">No analizados: '+Object.entries(data.skipped).map(([k,v])=>safe(k)+' ('+v+')').join(' · ')+'</p>':'';
   const diagnostic='<details class="small" style="margin:10px 0" open><summary>Diagnóstico de datos y competiciones</summary>'+
    '<p>Filas locales: '+Number(data.local_games_count||0)+' partidos · '+Number(data.local_team_stats_count||0)+' registros de equipo.</p>'+
@@ -792,7 +794,7 @@ document.getElementById('build-parlay').addEventListener('click',async()=>{
    '<p>Competiciones detectadas en la ventana: '+(data.fixture_competitions_in_window||[]).map(safe).join(' / ')+'</p>'+
    '<p>Detalle de fechas/competiciones sin historial: '+(data.history_skip_examples||[]).map(safe).join(' · ')+'</p>'+
    '<p>Detalle de equipos sin coincidencia: '+(data.team_name_skip_examples||[]).map(safe).join(' · ')+'</p></details>';
-  let body='<div class="panel"><div class="row"><h3>Resultado de búsqueda</h3><span class="pill">'+safe(data.status)+'</span></div>'+stats+skips+diagnostic;
+  let body='<div class="panel"><div class="row"><h3>Resultado de búsqueda</h3><span class="pill">'+safe(data.status)+'</span></div>'+stats+skips+filterAudit+diagnostic;
   if(data.top_picks&&data.top_picks.length){
    body+='<h3>Mejores picks individuales encontrados</h3>'+data.top_picks.slice(0,8).map((c,i)=>parlayCandidateHtml(c,i)).join('');
   }else{
