@@ -382,6 +382,67 @@ def _market_metadata() -> dict[str, dict]:
         }
     return result
 
+
+def market_catalogue_audit() -> dict:
+    """Return a safe, quota-light diagnostic of full-game basketball market definitions."""
+    data = _get("markets", {"language": "en"}, ttl=86400)
+    if not isinstance(data, list):
+        raise OddsPapiError("El catálogo de mercados de OddsPapi tiene un formato inesperado.")
+    audit = {
+        "sport_id": SPORT_ID_BASKETBALL,
+        "catalogue_rows_received": len(data),
+        "families": {},
+        "catalogue_fields": [],
+    }
+    for row in data:
+        if not isinstance(row, dict) or int(row.get("sportId") or 0) != SPORT_ID_BASKETBALL:
+            continue
+        family = _market_family(row.get("marketName"))
+        if not family or not _is_full_game_period(str(row.get("period") or "")):
+            continue
+        bucket = audit["families"].setdefault(family, {
+            "definitions": 0, "with_handicap": 0, "without_handicap": 0,
+            "periods": {}, "samples": [],
+        })
+        bucket["definitions"] += 1
+        raw_handicap = row.get("handicap")
+        try:
+            handicap = float(raw_handicap) if raw_handicap not in (None, "") else None
+        except (TypeError, ValueError):
+            handicap = None
+        if handicap is None:
+            bucket["without_handicap"] += 1
+        else:
+            bucket["with_handicap"] += 1
+        period = str(row.get("period") or "")
+        bucket["periods"][period] = bucket["periods"].get(period, 0) + 1
+        if len(bucket["samples"]) < 8:
+            outcomes = row.get("outcomes") or []
+            if isinstance(outcomes, list):
+                outcome_names = [
+                    str(x.get("outcomeName") or "")
+                    for x in outcomes if isinstance(x, dict)
+                ]
+            elif isinstance(outcomes, dict):
+                outcome_names = [
+                    str(x.get("outcomeName") or x or "")
+                    for x in outcomes.values()
+                ]
+            else:
+                outcome_names = []
+            bucket["samples"].append({
+                "market_id": str(row.get("marketId") or ""),
+                "market_name": str(row.get("marketName") or ""),
+                "period": period,
+                "handicap_raw": None if raw_handicap is None else str(raw_handicap),
+                "handicap_parsed": handicap,
+                "market_type": str(row.get("marketType") or ""),
+                "outcomes": outcome_names[:4],
+            })
+        if not audit["catalogue_fields"]:
+            audit["catalogue_fields"] = sorted(str(k) for k in row.keys())
+    return audit
+
 def _select_bookmakers(available_bookmakers: list[str]) -> list[str]:
     """Choose a small, deterministic set of subscribed sportsbook slugs."""
     exact = {
