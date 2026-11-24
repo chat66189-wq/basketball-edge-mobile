@@ -413,32 +413,74 @@ def _market_metadata() -> dict[str, dict]:
 
 
 def market_catalogue_audit() -> dict:
-    """Return a safe, quota-light diagnostic of full-game basketball market definitions."""
+    """Audit only eligible, two-way full-game basketball catalogue definitions."""
     data = _get("markets", {"language": "en"}, ttl=86400)
     if not isinstance(data, list):
         raise OddsPapiError("El catálogo de mercados de OddsPapi tiene un formato inesperado.")
     audit = {
         "sport_id": SPORT_ID_BASKETBALL,
         "catalogue_rows_received": len(data),
+        "basketball_rows": 0,
+        "excluded_wrong_period_or_family": 0,
+        "excluded_props_or_non_two_way": 0,
+        "excluded_invalid_outcomes": 0,
+        "excluded_missing_handicap": 0,
         "families": {},
         "catalogue_fields": [],
     }
     for row in data:
-        if not isinstance(row, dict) or int(row.get("sportId") or 0) != SPORT_ID_BASKETBALL:
+        if not isinstance(row, dict) or str(row.get("sportId") or "") != str(SPORT_ID_BASKETBALL):
             continue
+        audit["basketball_rows"] += 1
         family = _market_family(row.get("marketName"))
         if not family or not _is_full_game_period(str(row.get("period") or "")):
+            audit["excluded_wrong_period_or_family"] += 1
             continue
-        bucket = audit["families"].setdefault(family, {
-            "definitions": 0, "with_handicap": 0, "without_handicap": 0,
-            "periods": {}, "samples": [],
-        })
-        bucket["definitions"] += 1
+        try:
+            market_length = int(row.get("marketLength") or 0)
+        except (TypeError, ValueError):
+            market_length = 0
+        if row.get("playerProp") is not False or market_length != 2:
+            audit["excluded_props_or_non_two_way"] += 1
+            continue
+
+        outcomes: dict[str, str] = {}
+        raw_outcomes = row.get("outcomes") or []
+        if isinstance(raw_outcomes, list):
+            for outcome in raw_outcomes:
+                if isinstance(outcome, dict) and outcome.get("outcomeId") is not None:
+                    outcomes[str(outcome["outcomeId"])] = str(outcome.get("outcomeName") or "")
+        elif isinstance(raw_outcomes, dict):
+            for outcome_id, outcome in raw_outcomes.items():
+                if isinstance(outcome, dict):
+                    outcomes[str(outcome_id)] = str(outcome.get("outcomeName") or "")
+                elif outcome is not None:
+                    outcomes[str(outcome_id)] = str(outcome)
+        expected = {"home", "away"} if family in {"moneyline", "spread"} else {"over", "under"}
+        canonical_sides = {
+            parsed[0] for label in outcomes.values()
+            if (parsed := _parse_label(label)) is not None and parsed[0] in expected
+        }
+        if len(outcomes) != 2 or canonical_sides != expected:
+            audit["excluded_invalid_outcomes"] += 1
+            continue
+
         raw_handicap = row.get("handicap")
         try:
             handicap = float(raw_handicap) if raw_handicap not in (None, "") else None
         except (TypeError, ValueError):
             handicap = None
+        if handicap is not None and not math.isfinite(handicap):
+            handicap = None
+        if family in {"total", "spread"} and handicap is None:
+            audit["excluded_missing_handicap"] += 1
+            continue
+
+        bucket = audit["families"].setdefault(family, {
+            "definitions": 0, "with_handicap": 0, "without_handicap": 0,
+            "periods": {}, "samples": [],
+        })
+        bucket["definitions"] += 1
         if handicap is None:
             bucket["without_handicap"] += 1
         else:
@@ -446,19 +488,6 @@ def market_catalogue_audit() -> dict:
         period = str(row.get("period") or "")
         bucket["periods"][period] = bucket["periods"].get(period, 0) + 1
         if len(bucket["samples"]) < 8:
-            outcomes = row.get("outcomes") or []
-            if isinstance(outcomes, list):
-                outcome_names = [
-                    str(x.get("outcomeName") or "")
-                    for x in outcomes if isinstance(x, dict)
-                ]
-            elif isinstance(outcomes, dict):
-                outcome_names = [
-                    str(x.get("outcomeName") or x or "")
-                    for x in outcomes.values()
-                ]
-            else:
-                outcome_names = []
             bucket["samples"].append({
                 "market_id": str(row.get("marketId") or ""),
                 "market_name": str(row.get("marketName") or ""),
@@ -466,11 +495,13 @@ def market_catalogue_audit() -> dict:
                 "handicap_raw": None if raw_handicap is None else str(raw_handicap),
                 "handicap_parsed": handicap,
                 "market_type": str(row.get("marketType") or ""),
-                "outcomes": outcome_names[:4],
+                "market_length": market_length,
+                "outcomes": list(outcomes.values())[:4],
             })
         if not audit["catalogue_fields"]:
             audit["catalogue_fields"] = sorted(str(k) for k in row.keys())
     return audit
+
 
 def _select_bookmakers(available_bookmakers: list[str]) -> list[str]:
     """Choose a small, deterministic set of subscribed sportsbook slugs."""
@@ -910,7 +941,9 @@ def games(
                 "parsed_outcomes": 0, "outcomes_mapped_by_catalogue": 0,
                 "outcomes_mapped_by_position": 0, "lines_from_bookmaker_label": 0,
                 "lines_from_catalogue": 0, "missing_market_line": 0,
-                "unparsed_outcomes": 0,
+                "unparsed_outcomes": 0, "missing_catalogue_outcome_ids": 0,
+                "outcome_label_conflicts": 0, "line_label_conflicts": 0,
+                "duplicate_outcome_conflicts": 0,
                 "stale_prices": 0, "incomplete_bookmaker_market_pairs": 0,
                 "paired_quotes": 0, "normalized_market_groups": 0,
             },
@@ -927,7 +960,10 @@ def games(
         "source_changes_over_1h", "source_timestamp_missing_or_invalid",
         "source_timestamp_future", "parsed_outcomes", "outcomes_mapped_by_catalogue",
         "outcomes_mapped_by_position", "lines_from_bookmaker_label",
-        "lines_from_catalogue", "missing_market_line", "unparsed_outcomes", "stale_prices", "incomplete_bookmaker_market_pairs", "paired_quotes",
+        "lines_from_catalogue", "missing_market_line", "unparsed_outcomes",
+        "missing_catalogue_outcome_ids", "outcome_label_conflicts",
+        "line_label_conflicts", "duplicate_outcome_conflicts", "stale_prices",
+        "incomplete_bookmaker_market_pairs", "paired_quotes",
         "normalized_market_groups",
     )
     odds_data_audit = {key: 0 for key in audit_fields}
