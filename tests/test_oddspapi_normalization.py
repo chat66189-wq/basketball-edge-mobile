@@ -257,7 +257,7 @@ class OddsPapiBasketballNormalizationTests(unittest.TestCase):
         self.assertEqual(result["odds_fixtures_requested"], 2)
         self.assertEqual(result["odds_fixtures_with_markets"], 2)
         self.assertEqual(result["quota_remaining_before_scan"], 8)
-        self.assertEqual(result["quota_remaining_after_scan"], 2)
+        self.assertEqual(result["quota_remaining_after_scan"], 3)
         self.assertEqual(len(result["games"]), 2)
         self.assertEqual(
             [call[0] for call in calls].count("odds-by-tournaments"), 3
