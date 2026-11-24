@@ -1008,8 +1008,9 @@ def _score_fixture(fixture: dict, all_games: list[dict], all_stats: list[dict],
 
         sides = ("home", "away") if market in ("moneyline", "spread") else ("over", "under")
         bookmaker_count = len({
-            str(q.get("bookmaker") or "").strip() for q in quotes
-            if str(q.get("bookmaker") or "").strip()
+            str(q.get("bookmaker_identity") or q.get("bookmaker") or "").strip()
+            for q in quotes
+            if str(q.get("bookmaker_identity") or q.get("bookmaker") or "").strip()
         })
         if diagnostics is not None and manual_groups is None:
             consensus_key = (
