@@ -59,6 +59,10 @@ class ScopeAndLegProbabilityTests(unittest.TestCase):
         self.assertIn("matches_with_odds_loaded", HTML)
         self.assertIn("Partidos compatibles con el historial", HTML)
 
+    def test_birmingham_and_laketown_names_share_one_franchise_history_key(self):
+        self.assertIn('if label in {"birminghamsquadron", "laketownsquadron"}', APP)
+        self.assertIn('return "laketownsquadron"', APP)
+
     def test_team_level_history_deficits_are_reported_for_targeted_top_up(self):
         self.assertIn('"history_deficit_examples": history_deficit_examples', APP)
         self.assertIn('"home_history_games": home_games', APP)
