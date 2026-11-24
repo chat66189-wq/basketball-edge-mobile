@@ -184,6 +184,105 @@ class OddsPapiBasketballNormalizationTests(unittest.TestCase):
         self.assertEqual(_competition_key("NCAA Women, Regular Season"), "ncaadivision1women")
         self.assertEqual(_competition_key("NBA G League Tip-Off Tournament"), "nbagleague")
 
+    def test_odds_by_tournament_response_parser_accepts_list_and_wrapped_rows(self):
+        from oddspapi_provider import _odds_by_tournament_rows
+
+        fixture = {"fixtureId": "fixture-123", "bookmakerOdds": {"bet365": {}}}
+        self.assertEqual(_odds_by_tournament_rows([fixture]), [fixture])
+        self.assertEqual(_odds_by_tournament_rows({"data": [fixture]}), [fixture])
+        self.assertEqual(_odds_by_tournament_rows(fixture), [fixture])
+        self.assertEqual(_odds_by_tournament_rows({"error": "empty"}), [])
+
+    def test_bulk_tournament_odds_aggregates_multiple_fixtures_and_bookmakers(self):
+        from oddspapi_provider import games
+
+        now = datetime.now(timezone.utc)
+        captured = (now - timedelta(minutes=5)).isoformat()
+        fixtures = [
+            {
+                "fixtureId": "nba-1", "participant1Name": "Home NBA",
+                "participant2Name": "Away NBA", "tournamentId": 132,
+                "tournamentName": "NBA", "startTime": (now + timedelta(hours=2)).isoformat(),
+                "statusId": 0,
+            },
+            {
+                "fixtureId": "gleague-1", "participant1Name": "Laketown Squadron",
+                "participant2Name": "Osceola Magic", "tournamentId": 998,
+                "tournamentName": "NBA G League Tip-Off Tournament",
+                "startTime": (now + timedelta(hours=3)).isoformat(), "statusId": 0,
+            },
+        ]
+        catalogue = {
+            "111": {"family": "moneyline", "handicap": 0,
+                    "outcomes": {"111": "Home", "112": "Away"}},
+            "22530": {"family": "total", "handicap": 220.5,
+                      "outcomes": {"22530": "Over", "22531": "Under"}},
+        }
+        account_rows = [
+            {"requests_remaining": 8, "bookmakers_available_in_plan": ["bet365", "betano", "pinnacle"]},
+            {"requests_remaining": 7, "bookmakers_available_in_plan": ["bet365", "betano", "pinnacle"]},
+            {"requests_remaining": 2, "bookmakers_available_in_plan": ["bet365", "betano", "pinnacle"]},
+        ]
+        calls = []
+
+        def fake_get(path, params=None, ttl=0, unmetered=False):
+            calls.append((path, dict(params or {})))
+            if path == "fixtures":
+                return fixtures
+            if path == "odds-by-tournaments":
+                bookmaker = params["bookmaker"]
+                offset = {"bet365": 0, "betano": 1, "pinnacle": 2}[bookmaker]
+                return [
+                    {
+                        "fixtureId": fixture["fixtureId"],
+                        "updatedAt": captured,
+                        "bookmakerOdds": {bookmaker: self._bookmaker(offset)},
+                    }
+                    for fixture in fixtures
+                ]
+            raise AssertionError("Unexpected OddsPapi endpoint: "+path)
+
+        with patch("oddspapi_provider.account_status", side_effect=account_rows), \\
+             patch("oddspapi_provider._cache_is_fresh", return_value=False), \\
+             patch("oddspapi_provider._get", side_effect=fake_get), \\
+             patch("oddspapi_provider._market_metadata", return_value=catalogue), \\
+             patch("oddspapi_provider.market_catalogue_audit", return_value={"families": {}}):
+            result = games(
+                now, now + timedelta(hours=6),
+                ["NBA", "NBA G League"],
+            )
+
+        self.assertEqual(result["odds_scan_method"], "odds-by-tournaments")
+        self.assertEqual(result["odds_requests_made"], 3)
+        self.assertEqual(result["odds_fixtures_requested"], 2)
+        self.assertEqual(result["odds_fixtures_with_markets"], 2)
+        self.assertEqual(result["quota_remaining_before_scan"], 8)
+        self.assertEqual(result["quota_remaining_after_scan"], 2)
+        self.assertEqual(len(result["games"]), 2)
+        self.assertEqual(
+            [call[0] for call in calls].count("odds-by-tournaments"), 3
+        )
+        for fixture in result["games"]:
+            self.assertEqual(len(fixture["periods"]["ft"]), 3)
+
+    def test_bulk_odds_search_abstains_before_spending_when_quota_is_too_low(self):
+        from oddspapi_provider import games
+
+        now = datetime.now(timezone.utc)
+        calls = []
+        account = {
+            "requests_remaining": 3,
+            "bookmakers_available_in_plan": ["bet365", "betano", "pinnacle"],
+        }
+        with patch("oddspapi_provider.account_status", return_value=account), \\
+             patch("oddspapi_provider._cache_is_fresh", return_value=False), \\
+             patch("oddspapi_provider._get", side_effect=lambda *args, **kwargs: calls.append(args)):
+            result = games(now, now + timedelta(hours=4), ["NBA"])
+
+        self.assertTrue(result["quota_blocked"])
+        self.assertIn("Cuota mensual insuficiente", result["provider_warning"])
+        self.assertEqual(calls, [])
+
     def test_bookmaker_labels_decode_spreads_and_totals(self):
         self.assertEqual(_parse_label("-4.5/home"), ("home", -4.5))
         self.assertEqual(_parse_label("+4.5/away"), ("away", 4.5))
