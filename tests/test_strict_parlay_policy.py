@@ -7,6 +7,7 @@ APP = (ROOT / "app.py").read_text(encoding="utf-8")
 HTML = (ROOT / "index.html").read_text(encoding="utf-8")
 SERVICE_WORKER = (ROOT / "sw.js").read_text(encoding="utf-8")
 ODDSPAPI = (ROOT / "oddspapi_provider.py").read_text(encoding="utf-8")
+OPTIMIZER = (ROOT / "parlay_optimizer.py").read_text(encoding="utf-8")
 
 
 class StrictParlayPolicyTests(unittest.TestCase):
@@ -23,7 +24,7 @@ class StrictParlayPolicyTests(unittest.TestCase):
     def test_automatic_search_uses_alternative_aware_grouped_optimizer(self):
         self.assertIn("strict_best_parlay, parlay_search_diagnostics = _best_automatic_parlay(", APP)
         self.assertIn('"parlay_search": parlay_search_diagnostics', APP)
-        self.assertIn("grouped_log_odds_dynamic_programming", APP)
+        self.assertIn("grouped_log_odds_dynamic_programming", OPTIMIZER)
 
     def test_two_bookmaker_paired_consensus_is_required(self):
         self.assertIn("MIN_AUTOMATIC_BOOKMAKER_CONSENSUS = 2", APP)
