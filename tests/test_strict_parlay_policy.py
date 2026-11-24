@@ -39,8 +39,8 @@ class StrictParlayPolicyTests(unittest.TestCase):
 
     def test_joint_parlay_estimate_has_a_thirty_percent_floor(self):
         self.assertIn("MIN_PARLAY_JOINT_PROBABILITY = 0.30", APP)
-        self.assertIn("if hit_probability < MIN_PARLAY_JOINT_PROBABILITY:", APP)
-        self.assertIn('"minimum_joint_probability": MIN_PARLAY_JOINT_PROBABILITY', APP)
+        self.assertIn("if hit_probability < MIN_PARLAY_JOINT_PROBABILITY:", OPTIMIZER)
+        self.assertIn('"minimum_joint_probability": MIN_PARLAY_JOINT_PROBABILITY', OPTIMIZER)
 
     def test_consensus_breakdown_is_reported(self):
         self.assertIn("bookmaker_groups_1_house", APP)
