@@ -685,8 +685,6 @@ def _normalise_odds_fixture(fixture: dict, odds: dict, market_families: dict[str
     for (family, line), by_book in groups.items():
         api_name = {"moneyline": "moneyline", "spread": "spread", "total": "total"}[family]
         for bookmaker, sides in by_book.items():
-            if not all(side in sides for side in expected if False):
-                pass
             required = ("home", "away") if family in {"moneyline", "spread"} else ("over", "under")
             if not all(side in sides for side in required):
                 audit["incomplete_bookmaker_market_pairs"] += 1
