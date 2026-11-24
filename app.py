@@ -946,6 +946,7 @@ def _fixture_market_groups(fixture: dict, now: datetime) -> dict:
                 key = (model_market, None if line is None else round(line, 2))
                 groups.setdefault(key, []).append({
                     "bookmaker": str(bookmaker),
+                    "bookmaker_identity": str(item.get("bookmaker_identity") or bookmaker).strip(),
                     "captured_at": str(item_captured),
                     "price_a": price_a,
                     "price_b": price_b,
