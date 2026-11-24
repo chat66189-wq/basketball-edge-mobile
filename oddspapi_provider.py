@@ -21,7 +21,7 @@ from urllib.request import Request, urlopen
 
 BASE = "https://api.oddspapi.io/v4"
 SPORT_ID_BASKETBALL = 11
-MAX_TOURNAMENT_BOOKMAKERS = 3
+MAX_TOURNAMENT_BOOKMAKERS = 5
 MAX_TOURNAMENT_IDS_PER_CALL = 3
 # Live OddsPapi tournament IDs for competitions already present in the mobile
 # app's local history. Names remain a fallback for other user-imported leagues.
@@ -535,34 +535,51 @@ def market_catalogue_audit() -> dict:
     return audit
 
 
+def _bookmaker_identity(value: str) -> str:
+    """Canonical operator identity so regional aliases do not fake independent consensus."""
+    compact = re.sub(r"[^a-z0-9]+", "", str(value or "").casefold())
+    # OddsPapi exposes the Argentine bet365 feed as a separate slug, but it is
+    # still the same betting brand and must not count as a second independent house.
+    if compact.startswith("bet365"):
+        return "bet365"
+    return compact
+
+
 def _select_bookmakers(available_bookmakers: list[str]) -> list[str]:
-    """Choose a small, deterministic set of subscribed sportsbook slugs."""
+    """Choose up to five subscribed, independent sportsbook brands deterministically."""
     exact = {
         str(name).strip().lower(): str(name).strip()
         for name in available_bookmakers
         if str(name).strip()
     }
     chosen: list[str] = []
-    for preferred in BOOKMAKER_PRIORITY:
-        slug = exact.get(preferred.lower())
-        if slug and slug not in chosen:
+    chosen_identities: set[str] = set()
+
+    def add(slug: str | None) -> None:
+        if not slug:
+            return
+        identity = _bookmaker_identity(slug)
+        if identity and identity not in chosen_identities and len(chosen) < MAX_TOURNAMENT_BOOKMAKERS:
             chosen.append(slug)
+            chosen_identities.add(identity)
+
+    for preferred in BOOKMAKER_PRIORITY:
+        add(exact.get(preferred.lower()))
         if len(chosen) >= MAX_TOURNAMENT_BOOKMAKERS:
             break
     if len(chosen) < MAX_TOURNAMENT_BOOKMAKERS:
-        # Fill from the user's actual subscription, preferring sportsbook
-        # slugs and excluding obvious casino-only entries.
         remainder = sorted(
             (
                 slug for slug in exact.values()
-                if slug not in chosen
-                and "casino" not in slug.lower()
+                if "casino" not in slug.lower()
             ),
             key=str.lower,
         )
-        chosen.extend(remainder[:MAX_TOURNAMENT_BOOKMAKERS - len(chosen)])
-    return chosen[:MAX_TOURNAMENT_BOOKMAKERS]
-
+        for slug in remainder:
+            add(slug)
+            if len(chosen) >= MAX_TOURNAMENT_BOOKMAKERS:
+                break
+    return chosen
 
 def _source_timestamp_age(value: str | None, now: datetime) -> float | None:
     """Age of the provider's last price change; this is not the time we captured the quote."""
@@ -773,6 +790,7 @@ def _normalise_odds_fixture(fixture: dict, odds: dict, market_families: dict[str
             captured = min(sides[x]["captured_at"] for x in required)
             entry = {
                 "line": line,
+                "bookmaker_identity": _bookmaker_identity(bookmaker),
                 required[0]: sides[required[0]]["price"],
                 required[1]: sides[required[1]]["price"],
                 "captured_at": captured,
@@ -994,6 +1012,12 @@ def games(
         raise OddsPapiError(
             "OddsPapi no devolvió casas de apuestas habilitadas para esta suscripción."
         )
+    if len(selected_bookmakers) < 2:
+        raise OddsPapiError(
+            "La suscripción no ofrece dos casas independientes. Los aliases de una misma marca, "
+            "como bet365 y bet365.bet.ar, cuentan como un solo operador.",
+            422,
+        )
 
     fixture_params = {
         "sportId": SPORT_ID_BASKETBALL,
@@ -1097,6 +1121,7 @@ def games(
     market_request_cost = 0 if _cache_is_fresh("markets", {"language": "en"}) else 1
     available_odds_calls = max(0, remaining_after_fixtures - market_request_cost)
     bookmaker_count = min(
+        len(selected_bookmakers),
         MAX_TOURNAMENT_BOOKMAKERS,
         available_odds_calls // len(tournament_groups),
     )
