@@ -207,7 +207,7 @@ class OddsPapiBasketballNormalizationTests(unittest.TestCase):
             "requests_remaining": 30,
             "bookmakers_available_in_plan": ["bet365.bet.ar", "bet365"],
         }
-        with patch("oddspapi_provider.account_status", return_value=account), \\
+        with patch("oddspapi_provider.account_status", return_value=account), \
              patch("oddspapi_provider._get") as get:
             with self.assertRaisesRegex(OddsPapiError, "dos casas independientes"):
                 games(now, now + timedelta(hours=4), ["NBA"])
