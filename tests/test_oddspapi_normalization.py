@@ -5,7 +5,9 @@ import unittest
 from unittest.mock import patch
 
 from oddspapi_provider import (
+    OddsPapiError,
     _competition_key,
+    _get_with_rate_limit_retry,
     _is_full_game_period,
     _market_family,
     _market_metadata,
@@ -17,6 +19,28 @@ from oddspapi_provider import (
 
 
 class OddsPapiBasketballNormalizationTests(unittest.TestCase):
+    def test_temporary_rate_limit_retries_with_bounded_backoff(self):
+        attempts = [
+            OddsPapiError("OddsPapi aplicó un límite temporal de solicitudes.", 429),
+            OddsPapiError("OddsPapi aplicó un límite temporal de solicitudes.", 429),
+            {"ok": True},
+        ]
+        with patch("oddspapi_provider._get", side_effect=attempts) as request, \
+             patch("oddspapi_provider.time.sleep") as sleep:
+            result = _get_with_rate_limit_retry("odds-by-tournaments", {"bookmaker": "test"})
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(request.call_count, 3)
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [2, 4])
+
+    def test_monthly_quota_exhaustion_is_not_retried(self):
+        error = OddsPapiError("Se agotó la cuota mensual de OddsPapi.", 429)
+        with patch("oddspapi_provider._get", side_effect=error) as request, \
+             patch("oddspapi_provider.time.sleep") as sleep:
+            with self.assertRaises(OddsPapiError):
+                _get_with_rate_limit_retry("odds-by-tournaments", {"bookmaker": "test"})
+        self.assertEqual(request.call_count, 1)
+        sleep.assert_not_called()
+
     def setUp(self):
         self.now = datetime(2026, 11, 23, 4, 0, tzinfo=timezone.utc)
         self.captured = (self.now - timedelta(minutes=5)).isoformat()
