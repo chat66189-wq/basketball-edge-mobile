@@ -706,19 +706,36 @@ def _normalise_odds_fixture(fixture: dict, odds: dict, market_families: dict[str
                     audit["unparsed_outcomes"] += 1
                     continue
 
-                side, raw_line = parsed
-                if family != "moneyline" and raw_line is not None:
+                side, catalogue_line = parsed
+                bookmaker_line = (
+                    bookmaker_parsed[1]
+                    if bookmaker_parsed is not None and bookmaker_parsed[0] == side
+                    else None
+                )
+                # The catalogue line is the market definition. Any line embedded
+                # in a bookmaker label is an independent consistency check, not
+                # a replacement for the catalogue's line.
+                if family != "moneyline":
                     expected_label_line = market_line
                     if family == "spread" and side == "away":
                         expected_label_line = -market_line
-                    if abs(float(raw_line) - expected_label_line) > 0.001:
-                        audit["line_label_conflicts"] += 1
+                    for reported_line in (catalogue_line, bookmaker_line):
+                        if reported_line is not None and abs(float(reported_line) - expected_label_line) > 0.001:
+                            audit["line_label_conflicts"] += 1
+                            break
+                    else:
+                        reported_line = None
+                    if any(
+                        reported_line is not None
+                        and abs(float(reported_line) - expected_label_line) > 0.001
+                        for reported_line in (catalogue_line, bookmaker_line)
+                    ):
                         continue
 
                 audit["parsed_outcomes"] += 1
                 if source == "catalogue":
                     audit["outcomes_mapped_by_catalogue"] += 1
-                if raw_line is not None:
+                if bookmaker_line is not None:
                     audit["lines_from_bookmaker_label"] += 1
                 if family != "moneyline":
                     audit["lines_from_catalogue"] += 1
