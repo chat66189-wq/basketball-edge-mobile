@@ -545,7 +545,14 @@ def _normalise_team_label(value: Any) -> str:
     label = _normalise_label(value)
     for suffix in ("womens", "women", "female", "mens", "men", "male"):
         if label.endswith(suffix) and len(label) > len(suffix) + 2:
-            return label[:-len(suffix)]
+            label = label[:-len(suffix)]
+            break
+
+    # The New Orleans G League affiliate moved from Birmingham to Kenner and
+    # was rebranded as Laketown Squadron for 2026-27. Treat the predecessor
+    # name as the same franchise so its recent box-score history is not lost.
+    if label in {"birminghamsquadron", "laketownsquadron"}:
+        return "laketownsquadron"
     return label
 
 
