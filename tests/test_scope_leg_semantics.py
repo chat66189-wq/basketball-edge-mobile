@@ -59,6 +59,21 @@ class ScopeAndLegProbabilityTests(unittest.TestCase):
         self.assertIn("matches_with_odds_loaded", HTML)
         self.assertIn("Partidos compatibles con el historial", HTML)
 
+    def test_team_level_history_deficits_are_reported_for_targeted_top_up(self):
+        self.assertIn('"history_deficit_examples": history_deficit_examples', APP)
+        self.assertIn('"home_history_games": home_games', APP)
+        self.assertIn('"away_history_games": away_games', APP)
+        self.assertIn("hasTeamHistoryDeficit", HTML)
+        self.assertIn("teamDeficitLabels", HTML)
+
+    def test_modelable_leagues_can_be_refreshed_when_fixture_team_is_short(self):
+        self.assertIn("const teamDeficitLabels=labels.filter", HTML)
+        self.assertIn("const fallbackDeficitLabels=hasShortHistory&&!deficits.length", HTML)
+        self.assertIn("Volviendo a consultar cuotas y analizar los equipos", HTML)
+
+    def test_team_names_are_normalized_without_dropping_ascii_characters(self):
+        self.assertIn("replace(/[\\u0300-\\u036f]/g", HTML)
+
     def test_probability_threshold_scope_is_explicit(self):
         self.assertIn('"minimum_estimated_leg_probability": MIN_ESTIMATED_LEG_PROBABILITY', APP)
         self.assertIn('"minimum_probability_scope": "each_parlay_leg_individually"', APP)

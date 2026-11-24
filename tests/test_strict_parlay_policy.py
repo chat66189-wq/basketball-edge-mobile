@@ -50,7 +50,7 @@ class StrictParlayPolicyTests(unittest.TestCase):
 
     def test_app_attempts_history_for_missing_leagues_even_when_some_games_match(self):
         self.assertIn("const hasMissingFixtureHistory=fixtureLabelsForTopUp.some", HTML)
-        self.assertIn("if(data.provider==='OddsPapi'&&hasMissingFixtureHistory)", HTML)
+        self.assertIn("if(data.provider==='OddsPapi'&&(hasMissingFixtureHistory||hasTeamHistoryDeficit))", HTML)
         self.assertNotIn("data.matches_matching_imported_competitions||0)===0", HTML)
 
     def test_ncaam_and_g_league_fixture_aliases_are_normalized_consistently(self):
@@ -62,7 +62,7 @@ class StrictParlayPolicyTests(unittest.TestCase):
         self.assertIn("if(label.startsWith('nbagleague'))return 'nbagleague'", HTML)
 
     def test_service_worker_refreshes_navigation_and_invalidates_prior_cache(self):
-        self.assertIn("basketball-edge-v37-batched-history-leg-probability", SERVICE_WORKER)
+        self.assertIn("basketball-edge-v38-team-history-topup", SERVICE_WORKER)
         self.assertIn("event.request.mode==='navigate'", SERVICE_WORKER)
 
 

@@ -1755,6 +1755,7 @@ async def recommend_parlay(request: Request):
         all_candidates = []
         skipped: dict[str, int] = {}
         history_skip_examples: list[str] = []
+        history_deficit_examples: list[dict] = []
         team_name_skip_examples: list[str] = []
         filter_diagnostics: dict[str, int] = {}
         analysed = 0
@@ -1771,7 +1772,23 @@ async def recommend_parlay(request: Request):
                     relaxed=best_effort_requested,
                 )
                 if reason:
-                    skipped[reason.split(":")[0]] = skipped.get(reason.split(":")[0], 0) + 1
+                    reason_key = reason.split(":")[0]
+                    skipped[reason_key] = skipped.get(reason_key, 0) + 1
+                    if reason_key == "historial_insuficiente" and len(history_deficit_examples) < 20:
+                        try:
+                            count_values = reason.split(":", 1)[1].split("/", 1)
+                            home_games, away_games = int(count_values[0]), int(count_values[1])
+                        except (IndexError, TypeError, ValueError):
+                            home_games, away_games = None, None
+                        history_deficit_examples.append({
+                            "event_id": str(fixture.get("game_id") or ""),
+                            "competition": str(fixture.get("competition") or ""),
+                            "home_team": str(fixture.get("home") or ""),
+                            "away_team": str(fixture.get("away") or ""),
+                            "home_history_games": home_games,
+                            "away_history_games": away_games,
+                            "minimum_history_games": minimum_history,
+                        })
                 else:
                     analysed += 1
                     all_candidates.extend(candidates)
@@ -1946,6 +1963,7 @@ async def recommend_parlay(request: Request):
             })[:40],
             "skipped": skipped,
             "history_skip_examples": history_skip_examples,
+            "history_deficit_examples": history_deficit_examples,
             "team_name_skip_examples": team_name_skip_examples,
             "eligible_market_selections": len(strict_candidates),
             "active_market_selections": len(active_candidates),
