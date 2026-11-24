@@ -46,7 +46,7 @@ from scripts.edge_v15.market_pricing import price_game_market, ev_per_unit  # no
 app = FastAPI(
     title="Basketball Edge Analyst v20 API",
     description="Adaptador web para el motor de proyección y simulación BEA. Las salidas son exploratorias, no picks validados.",
-    version="20.3.0-oddspapi-catalogue-safe",
+    version="20.4.0-espn-resilient-parlay-search",
 )
 
 frontend_origin = os.environ.get("FRONTEND_ORIGIN", "https://chat66189-wq.github.io")
@@ -122,6 +122,154 @@ def _parlay_rank(hit_probability: float, combined_odds: float,
     """Prefer the highest joint estimate, then the closest price to target."""
     relative_distance = abs(combined_odds - target_odds) / target_odds
     return (hit_probability, -relative_distance, -leg_count)
+
+
+
+def _best_automatic_parlay(source: list[dict], target_odds: float) -> tuple[dict | None, dict]:
+    """Search strict picks while preserving multiple market alternatives per event."""
+    target_min, target_max = _parlay_odds_band(target_odds)
+    target_log = math.log(target_odds)
+    minimum_log = math.log(target_min)
+    maximum_log = math.log(target_max)
+    by_bookmaker: dict[str, dict[str, dict[tuple, dict]]] = {}
+
+    def candidate_rank(item: dict) -> tuple[float, float, float, float]:
+        return (
+            float(item.get("probability") or 0.0),
+            float(item.get("edge_percentage_points") or 0.0),
+            float(item.get("score") or 0.0),
+            float(item.get("odds") or 0.0),
+        )
+
+    for item in source:
+        if not isinstance(item, dict) or not item.get("passes_strict_filters", False):
+            continue
+        bookmaker = str(item.get("bookmaker") or "").strip()
+        event_id = str(item.get("event_id") or "").strip()
+        if not bookmaker or not event_id:
+            continue
+        try:
+            odds = float(item.get("odds"))
+            probability = float(item.get("probability"))
+        except (TypeError, ValueError):
+            continue
+        if (
+            not math.isfinite(odds) or not math.isfinite(probability)
+            or odds <= 1.0 or odds > target_max or not 0.0 < probability <= 1.0
+            or probability < MIN_ESTIMATED_LEG_PROBABILITY
+        ):
+            continue
+        selection_key = (
+            str(item.get("market") or ""),
+            str(item.get("side") or ""),
+            item.get("line"),
+        )
+        event_selections = by_bookmaker.setdefault(bookmaker, {}).setdefault(event_id, {})
+        previous = event_selections.get(selection_key)
+        if previous is None or candidate_rank(item) > candidate_rank(previous):
+            event_selections[selection_key] = item
+
+    best = None
+    search = {
+        "strict_candidate_selections": sum(
+            len(selections)
+            for events in by_bookmaker.values()
+            for selections in events.values()
+        ),
+        "bookmakers_with_candidates": len(by_bookmaker),
+        "event_groups_available": sum(len(events) for events in by_bookmaker.values()),
+        "event_groups_considered": 0,
+        "alternative_selections_considered": 0,
+        "maximum_event_groups_per_bookmaker": 40,
+        "maximum_alternatives_per_event": 24,
+        "log_odds_bucket_step": 0.05,
+        "dynamic_programming_log_odds_resolution": 0.0005,
+    }
+    step = 0.0005
+    for bookmaker, events in by_bookmaker.items():
+        event_groups = []
+        for event_id, selections in events.items():
+            by_price_band = {}
+            for item in selections.values():
+                odds = float(item["odds"])
+                price_band = int(round(math.log(odds) / 0.05))
+                previous = by_price_band.get(price_band)
+                if previous is None or candidate_rank(item) > candidate_rank(previous):
+                    by_price_band[price_band] = item
+            options = sorted(by_price_band.values(), key=candidate_rank, reverse=True)[:24]
+            if options:
+                event_groups.append((event_id, options))
+        event_groups.sort(
+            key=lambda row: max(candidate_rank(item) for item in row[1]),
+            reverse=True,
+        )
+        event_groups = event_groups[:40]
+        search["event_groups_considered"] += len(event_groups)
+        search["alternative_selections_considered"] += sum(len(options) for _, options in event_groups)
+        if not event_groups:
+            continue
+
+        # State: log probability, exact log odds, and selected legs.
+        dp: list[dict[int, tuple[float, float, tuple[dict, ...]]]] = [{} for _ in range(9)]
+        dp[0][0] = (0.0, 0.0, ())
+        for _, options in event_groups:
+            previous_states = [tuple(dp[count].items()) for count in range(8)]
+            option_logs = [
+                (item, math.log(float(item["odds"])), math.log(float(item["probability"])))
+                for item in options
+            ]
+            for count, states in enumerate(previous_states):
+                if not states:
+                    continue
+                for _, state in states:
+                    log_probability, log_odds, legs = state
+                    for item, item_log_odds, item_log_probability in option_logs:
+                        combined_log_odds = log_odds + item_log_odds
+                        if combined_log_odds > maximum_log + step:
+                            continue
+                        bucket = int(round(combined_log_odds / step))
+                        next_state = (
+                            log_probability + item_log_probability,
+                            combined_log_odds,
+                            legs + (item,),
+                        )
+                        old = dp[count + 1].get(bucket)
+                        if (
+                            old is None
+                            or next_state[0] > old[0] + 1e-12
+                            or (
+                                abs(next_state[0] - old[0]) <= 1e-12
+                                and abs(next_state[1] - target_log) < abs(old[1] - target_log)
+                            )
+                        ):
+                            dp[count + 1][bucket] = next_state
+
+        for count in range(1, 9):
+            for log_probability, log_odds, legs in dp[count].values():
+                if not minimum_log <= log_odds <= maximum_log:
+                    continue
+                hit_probability = math.exp(log_probability)
+                if hit_probability < MIN_PARLAY_JOINT_PROBABILITY:
+                    continue
+                combined_odds = math.exp(log_odds)
+                rank = _parlay_rank(hit_probability, combined_odds, target_odds, count)
+                if best is None or rank > best["rank"]:
+                    best = {
+                        "rank": rank,
+                        "bookmaker": bookmaker,
+                        "combined_odds": combined_odds,
+                        "target_odds": target_odds,
+                        "target_odds_min": target_min,
+                        "target_odds_max": target_max,
+                        "odds_deviation": combined_odds - target_odds,
+                        "odds_deviation_percent": ((combined_odds / target_odds) - 1.0) * 100.0,
+                        "estimated_hit_probability": hit_probability,
+                        "minimum_joint_probability": MIN_PARLAY_JOINT_PROBABILITY,
+                        "joint_probability_method": "product_of_leg_estimates_assuming_approximate_independence",
+                        "optimization_method": "grouped_log_odds_dynamic_programming",
+                        "legs": list(legs),
+                    }
+    return best, search
 
 
 def _simulate_game_for_settlement(projection, *, simulations: int, seed: int,
@@ -1624,6 +1772,7 @@ async def recommend_bookmaker_parlay(request: Request):
             "minimum_history_games": minimum_history,
             "top_picks": top_picks,
             "best_parlay": best_parlay,
+            "parlay_search": parlay_search_diagnostics,
             "warnings": warnings,
             "provider": house + " (cuotas manuales)",
         }
@@ -1810,61 +1959,13 @@ async def recommend_parlay(request: Request):
                 reverse=True,
             )[:12]
 
-        def _best_parlay(source: list[dict]) -> dict | None:
-            by_bookmaker: dict[str, list[dict]] = {}
-            for candidate in source:
-                by_bookmaker.setdefault(candidate["bookmaker"], []).append(candidate)
-            best = None
-            target_min, target_max = _parlay_odds_band(target_odds)
-            for bookmaker, items in by_bookmaker.items():
-                per_game = {}
-                for item in items:
-                    old = per_game.get(item["event_id"])
-                    if old is None or (
-                        item["probability"], item["edge_percentage_points"], item["score"]
-                    ) > (old["probability"], old["edge_percentage_points"], old["score"]):
-                        per_game[item["event_id"]] = item
-                pool = sorted(
-                    per_game.values(),
-                    key=lambda x: (x["probability"], x["edge_percentage_points"], x["score"]),
-                    reverse=True,
-                )[:18]
-                local_best = None
-                for leg_count in range(1, min(8, len(pool)) + 1):
-                    for combo in combinations(pool, leg_count):
-                        combined_odds = math.prod(x["odds"] for x in combo)
-                        if combined_odds < target_min - 1e-9 or combined_odds > target_max + 1e-9:
-                            continue
-                        hit_probability = math.prod(x["probability"] for x in combo)
-                        if hit_probability < MIN_PARLAY_JOINT_PROBABILITY:
-                            continue
-                        rank = _parlay_rank(hit_probability, combined_odds, target_odds, leg_count)
-                        if local_best is None or rank > local_best["rank"]:
-                            local_best = {
-                                "rank": rank,
-                                "bookmaker": bookmaker,
-                                "combined_odds": combined_odds,
-                                "target_odds": target_odds,
-                                "target_odds_min": target_min,
-                                "target_odds_max": target_max,
-                                "odds_deviation": combined_odds - target_odds,
-                                "odds_deviation_percent": ((combined_odds / target_odds) - 1.0) * 100.0,
-                                "estimated_hit_probability": hit_probability,
-                                "minimum_joint_probability": MIN_PARLAY_JOINT_PROBABILITY,
-                                "joint_probability_method": "product_of_leg_estimates_assuming_approximate_independence",
-                                "legs": list(combo),
-                            }
-                if local_best and (best is None or local_best["rank"] > best["rank"]):
-                    best = local_best
-            return best
-
-        strict_best_parlay = _best_parlay(strict_candidates)
+        strict_best_parlay, parlay_search_diagnostics = _best_automatic_parlay(
+            strict_candidates, target_odds
+        )
         best_effort_fallback_attempted = bool(best_effort_requested and strict_best_parlay is None)
         active_candidates = all_candidates if best_effort_fallback_attempted else strict_candidates
         top_picks = _top_picks(active_candidates)
-        best_parlay = (
-            _best_parlay(active_candidates) if best_effort_fallback_attempted else strict_best_parlay
-        )
+        best_parlay = strict_best_parlay
 
         if best_parlay:
             best_parlay.pop("rank", None)
