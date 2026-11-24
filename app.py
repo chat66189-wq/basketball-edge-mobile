@@ -46,7 +46,7 @@ from scripts.edge_v15.market_pricing import price_game_market, ev_per_unit  # no
 app = FastAPI(
     title="Basketball Edge Analyst v20 API",
     description="Adaptador web para el motor de proyección y simulación BEA. Las salidas son exploratorias, no picks validados.",
-    version="20.2.0-espn-history-conservative",
+    version="20.3.0-oddspapi-catalogue-safe",
 )
 
 frontend_origin = os.environ.get("FRONTEND_ORIGIN", "https://chat66189-wq.github.io")
