@@ -719,17 +719,15 @@ def _normalise_odds_fixture(fixture: dict, odds: dict, market_families: dict[str
                     expected_label_line = market_line
                     if family == "spread" and side == "away":
                         expected_label_line = -market_line
-                    for reported_line in (catalogue_line, bookmaker_line):
-                        if reported_line is not None and abs(float(reported_line) - expected_label_line) > 0.001:
-                            audit["line_label_conflicts"] += 1
-                            break
-                    else:
-                        reported_line = None
+                    reported_lines = [
+                        value for value in (catalogue_line, bookmaker_line)
+                        if value is not None
+                    ]
                     if any(
-                        reported_line is not None
-                        and abs(float(reported_line) - expected_label_line) > 0.001
-                        for reported_line in (catalogue_line, bookmaker_line)
+                        abs(float(value) - expected_label_line) > 0.001
+                        for value in reported_lines
                     ):
+                        audit["line_label_conflicts"] += 1
                         continue
 
                 audit["parsed_outcomes"] += 1
