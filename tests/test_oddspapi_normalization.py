@@ -221,7 +221,7 @@ class OddsPapiBasketballNormalizationTests(unittest.TestCase):
         account_rows = [
             {"requests_remaining": 8, "bookmakers_available_in_plan": ["bet365", "betano", "pinnacle"]},
             {"requests_remaining": 7, "bookmakers_available_in_plan": ["bet365", "betano", "pinnacle"]},
-            {"requests_remaining": 2, "bookmakers_available_in_plan": ["bet365", "betano", "pinnacle"]},
+            {"requests_remaining": 3, "bookmakers_available_in_plan": ["bet365", "betano", "pinnacle"]},
         ]
         calls = []
 
