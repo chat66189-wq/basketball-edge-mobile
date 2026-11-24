@@ -242,10 +242,10 @@ class OddsPapiBasketballNormalizationTests(unittest.TestCase):
                 ]
             raise AssertionError("Unexpected OddsPapi endpoint: "+path)
 
-        with patch("oddspapi_provider.account_status", side_effect=account_rows), \\
-             patch("oddspapi_provider._cache_is_fresh", return_value=False), \\
-             patch("oddspapi_provider._get", side_effect=fake_get), \\
-             patch("oddspapi_provider._market_metadata", return_value=catalogue), \\
+        with patch("oddspapi_provider.account_status", side_effect=account_rows), \
+             patch("oddspapi_provider._cache_is_fresh", return_value=False), \
+             patch("oddspapi_provider._get", side_effect=fake_get), \
+             patch("oddspapi_provider._market_metadata", return_value=catalogue), \
              patch("oddspapi_provider.market_catalogue_audit", return_value={"families": {}}):
             result = games(
                 now, now + timedelta(hours=6),
@@ -274,8 +274,8 @@ class OddsPapiBasketballNormalizationTests(unittest.TestCase):
             "requests_remaining": 3,
             "bookmakers_available_in_plan": ["bet365", "betano", "pinnacle"],
         }
-        with patch("oddspapi_provider.account_status", return_value=account), \\
-             patch("oddspapi_provider._cache_is_fresh", return_value=False), \\
+        with patch("oddspapi_provider.account_status", return_value=account), \
+             patch("oddspapi_provider._cache_is_fresh", return_value=False), \
              patch("oddspapi_provider._get", side_effect=lambda *args, **kwargs: calls.append(args)):
             result = games(now, now + timedelta(hours=4), ["NBA"])
 
