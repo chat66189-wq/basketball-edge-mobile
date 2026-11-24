@@ -723,44 +723,76 @@ async function autoTopUpHistoryForFixtures(analysis){
  const message=document.getElementById('parlay-message');
  const labels=Array.isArray(analysis.fixture_competitions_in_window)?analysis.fixture_competitions_in_window:[];
  const modelableKeys=new Set((analysis.modelable_competitions||[]).map(autoCompetitionKey));
+ const supportedKeys=new Set(['nba','nbagleague','nbl','wnba','ncaadivision1men','ncaadivision1women']);
+ const deficits=Array.isArray(analysis.history_deficit_examples)?analysis.history_deficit_examples:[];
+ const hasShortHistory=Number(analysis.skipped?.historial_insuficiente||0)>0;
+ const deficitKeys=new Set(deficits.map(item=>autoCompetitionKey(item.competition)).filter(Boolean));
  const missing=[...new Set(labels.filter(label=>{
   const key=autoCompetitionKey(label);
   return key&&!modelableKeys.has(key);
  }))];
- const supportedKeys=new Set(['nba','nbagleague','nbl','wnba','ncaadivision1men','ncaadivision1women']);
+ // A league can be modelable overall while a team in a specific fixture has
+ // fewer than 12 games. Refresh those real fixture leagues too.
+ const teamDeficitLabels=labels.filter(label=>deficitKeys.has(autoCompetitionKey(label)));
+ const fallbackDeficitLabels=hasShortHistory&&!deficits.length
+  ?labels.filter(label=>supportedKeys.has(autoCompetitionKey(label))):[];
+ const refreshLabels=[...new Set([...missing,...teamDeficitLabels,...fallbackDeficitLabels])];
+ const unsupported=[...new Set([
+  ...missing.filter(label=>!supportedKeys.has(autoCompetitionKey(label))),
+  ...teamDeficitLabels.filter(label=>!supportedKeys.has(autoCompetitionKey(label)))
+ ])];
  const now=Date.now();
  const audit=analysis.competition_history_audit||{};
- const eligible=missing.filter(label=>{
+ const minimum=Number(analysis.minimum_history_games||12);
+ const normTeam=value=>String(value||'').normalize('NFKD').replace(/[\\u0300-\\u036f]/g,'').toLowerCase().replace(/[^a-z0-9]+/g,'');
+ const candidates=refreshLabels.map(label=>{
   const key=autoCompetitionKey(label);
-  if(!supportedKeys.has(key))return false;
-  const last=Number(localStorage.getItem('bea-v20-espn-history:'+key)||0);
-  return !last||now-last>12*60*60*1000;
- }).sort((a,b)=>{
-  const ah=Number(audit[autoCompetitionKey(a)]?.estimated_games_to_import||999999);
-  const bh=Number(audit[autoCompetitionKey(b)]?.estimated_games_to_import||999999);
-  return ah-bh||a.localeCompare(b);
+  if(!supportedKeys.has(key))return null;
+  const shortTeams=deficits.filter(item=>autoCompetitionKey(item.competition)===key).flatMap(item=>{
+   const rows=[];
+   if(Number(item.home_history_games??minimum)<minimum&&item.home_team)rows.push(item.home_team);
+   if(Number(item.away_history_games??minimum)<minimum&&item.away_team)rows.push(item.away_team);
+   return rows;
+  });
+  const teamKeys=[...new Set(shortTeams.map(normTeam).filter(Boolean))];
+  const cooldownKeys=teamKeys.length
+   ?teamKeys.map(team=>'bea-v20-espn-history:'+key+':team:'+team)
+   :['bea-v20-espn-history:'+key];
+  const due=cooldownKeys.some(storageKey=>{
+   const last=Number(localStorage.getItem(storageKey)||0);
+   return !last||now-last>12*60*60*1000;
+  });
+  return {label,key,cooldownKeys,due};
+ }).filter(item=>item&&item.due).sort((a,b)=>{
+  const ah=Number(audit[a.key]?.estimated_games_to_import||999999);
+  const bh=Number(audit[b.key]?.estimated_games_to_import||999999);
+  return ah-bh||a.label.localeCompare(b.label);
  });
- const unsupported=missing.filter(label=>!supportedKeys.has(autoCompetitionKey(label)));
- const selectedEligible=eligible.slice(0,2);
- if(!selectedEligible.length){
-  return {teamStatsRows:0,summary:'No se consultó SportAPI.ai. '+(unsupported.length?'ESPN no tiene un mapeo público implementado para: '+unsupported.join(', ')+'. ':'')+'Las competiciones compatibles ya se consultaron recientemente o no tienen cobertura ESPN.'};
+ const deferred=candidates.slice(2);
+ const selected=candidates.slice(0,2);
+ if(!selected.length){
+  const deficitText=deficits.length?' Los equipos con muestra corta ya fueron actualizados recientemente o ESPN no puede completar más datos.':'';
+  return {teamStatsRows:0,summary:'No se consultó SportAPI.ai. '+(unsupported.length?'ESPN no tiene cobertura pública mapeada para: '+unsupported.join(', ')+'. ':'')+'No hay una actualización ESPN pendiente para las competiciones de esta ventana.'+deficitText};
  }
- message.textContent='Completando historial sin SportAPI.ai · ESPN público · '+selectedEligible.join(', ')+'. Solo se guardarán box scores completos.';
- const query=new URLSearchParams({competitions:selectedEligible.join(','),days:'400',max_games_per_league:'220'});
+ const selectedLabels=selected.map(item=>item.label);
+ const deficitSummary=deficits.filter(item=>selected.some(selectedItem=>selectedItem.key===autoCompetitionKey(item.competition))).map(item=>{
+  return item.competition+': '+item.home_team+' ('+item.home_history_games+'/'+minimum+') vs '+item.away_team+' ('+item.away_history_games+'/'+minimum+')';
+ });
+ message.textContent='Completando historial por equipo · ESPN público · '+selectedLabels.join(', ')+'. Solo se guardarán box scores completos.';
+ const query=new URLSearchParams({competitions:selectedLabels.join(','),days:'400',max_games_per_league:'220'});
  const data=await providerRequest('/api/espn/history-sync?'+query);
  const merged=await persistEspnHistoryWithoutDuplicates(data);
- if(merged.statsAdded>0){
-  for(const label of selectedEligible){
-   const key=autoCompetitionKey(label);
-   if(key)localStorage.setItem('bea-v20-espn-history:'+key,String(now));
-  }
+ // Cool down successful requests even when ESPN returns no new rows; otherwise
+ // one short-history fixture could trigger the same full sync on every search.
+ for(const item of selected){
+  for(const storageKey of item.cooldownKeys)localStorage.setItem(storageKey,String(now));
  }
  const warnings=(data.warnings||[]).join(' ');
- const deferred=eligible.slice(2);
  let summary='Actualización automática sin SportAPI.ai: ESPN consultó '+(data.competitions_supported||[]).join(', ')+
   ' · partidos nuevos '+merged.gamesAdded+' · duplicados reconciliados '+merged.duplicateGames+
   ' · registros nuevos de equipo '+merged.statsAdded+'.';
- if(deferred.length)summary+=' Otras ligas compatibles pendientes para próximas búsquedas: '+deferred.join(', ')+'.';
+ if(deficitSummary.length)summary+=' Muestra corta detectada: '+deficitSummary.join(' | ')+'.';
+ if(deferred.length)summary+=' Otras competiciones compatibles pendientes para próximas búsquedas: '+deferred.map(item=>item.label).join(', ')+'.';
  if(unsupported.length)summary+=' Sin cobertura ESPN: '+unsupported.join(', ')+'.';
  if(warnings)summary+=' '+warnings;
  return {teamStatsRows:merged.statsAdded,summary};
@@ -962,7 +994,8 @@ document.getElementById('build-parlay').addEventListener('click',async()=>{
    const key=autoCompetitionKey(label);
    return key&&!modelableKeysForTopUp.has(key);
   });
-  if(data.provider==='OddsPapi'&&hasMissingFixtureHistory){
+  const hasTeamHistoryDeficit=Number(data.skipped?.historial_insuficiente||0)>0;
+  if(data.provider==='OddsPapi'&&(hasMissingFixtureHistory||hasTeamHistoryDeficit)){
    try{
     const updated=await autoTopUpHistoryForFixtures(data);
     autoHistorySummary=updated.summary;
