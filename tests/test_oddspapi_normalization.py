@@ -155,6 +155,30 @@ class OddsPapiBasketballNormalizationTests(unittest.TestCase):
         self.assertEqual(metadata["222"]["outcomes"], {"222": "Over", "223": "Under"})
         self.assertEqual(metadata["333"]["handicap"], -4.5)
 
+    def test_catalogue_participant_names_resolve_to_fixture_home_and_away(self):
+        rows = [
+            self._catalogue_row(111, "Winner (incl. overtime)", 0,
+                                [(111, "Home Club"), (112, "Away Club")]),
+        ]
+        with patch("oddspapi_provider._get", return_value=rows):
+            metadata = _market_metadata()
+        self.assertEqual(metadata["111"]["outcomes"], {
+            "111": "Home Club", "112": "Away Club"
+        })
+        normalized = _normalise_odds_fixture(
+            self.fixture,
+            {"bookmakerOdds": {"book-one": self._bookmaker(0)}},
+            {"111": {
+                "family": "moneyline", "handicap": 0,
+                "outcomes": {"111": "Home Club", "112": "Away Club"},
+            }},
+            self.now,
+        )
+        quote = normalized["periods"]["ft"]["book-one"]["moneyline"][0]
+        self.assertEqual(quote["home"], 1.8)
+        self.assertEqual(quote["away"], 2.0)
+        self.assertEqual(normalized["odds_audit"]["outcomes_mapped_by_position"], 0)
+
     def test_provider_competition_aliases_match_local_history_labels(self):
         self.assertEqual(_competition_key("NCAA, Regular Season"), "ncaadivision1men")
         self.assertEqual(_competition_key("NCAA Women, Regular Season"), "ncaadivision1women")
