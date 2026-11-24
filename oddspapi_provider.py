@@ -21,8 +21,8 @@ from urllib.request import Request, urlopen
 
 BASE = "https://api.oddspapi.io/v4"
 SPORT_ID_BASKETBALL = 11
-MAX_ODDS_FIXTURES_PER_RUN = 8
-MAX_BOOKMAKERS_PER_FIXTURE = 8
+MAX_TOURNAMENT_BOOKMAKERS = 3
+MAX_TOURNAMENT_IDS_PER_CALL = 3
 # Live OddsPapi tournament IDs for competitions already present in the mobile
 # app's local history. Names remain a fallback for other user-imported leagues.
 TOURNAMENT_IDS_BY_COMPETITION = {
@@ -267,11 +267,11 @@ def _get(path: str, params: dict | None = None, ttl: int = 0, unmetered: bool = 
     return data
 
 
-def account_status() -> dict:
+def account_status(force_refresh: bool = False) -> dict:
     if not os.environ.get("ODDSPAPI_API_KEY", "").strip():
         return {"configured": False, "provider": "OddsPapi", "connected": False,
                 "message": "Falta ODDSPAPI_API_KEY en Render."}
-    data = _get("account", ttl=45, unmetered=True)
+    data = _get("account", ttl=0 if force_refresh else 10, unmetered=True)
     subscriptions = data.get("subscriptions") if isinstance(data, dict) else None
     active = next((x for x in (subscriptions or []) if isinstance(x, dict) and x.get("is_active")), None)
     if not active and subscriptions:
@@ -547,9 +547,9 @@ def _select_bookmakers(available_bookmakers: list[str]) -> list[str]:
         slug = exact.get(preferred.lower())
         if slug and slug not in chosen:
             chosen.append(slug)
-        if len(chosen) >= MAX_BOOKMAKERS_PER_FIXTURE:
+        if len(chosen) >= MAX_TOURNAMENT_BOOKMAKERS:
             break
-    if len(chosen) < MAX_BOOKMAKERS_PER_FIXTURE:
+    if len(chosen) < MAX_TOURNAMENT_BOOKMAKERS:
         # Fill from the user's actual subscription, preferring sportsbook
         # slugs and excluding obvious casino-only entries.
         remainder = sorted(
@@ -560,8 +560,8 @@ def _select_bookmakers(available_bookmakers: list[str]) -> list[str]:
             ),
             key=str.lower,
         )
-        chosen.extend(remainder[:MAX_BOOKMAKERS_PER_FIXTURE - len(chosen)])
-    return chosen[:MAX_BOOKMAKERS_PER_FIXTURE]
+        chosen.extend(remainder[:MAX_TOURNAMENT_BOOKMAKERS - len(chosen)])
+    return chosen[:MAX_TOURNAMENT_BOOKMAKERS]
 
 
 def _source_timestamp_age(value: str | None, now: datetime) -> float | None:
@@ -883,11 +883,92 @@ def _fixture_competition_label(fixture: dict, preferred_keys: set[str] | None = 
     return next((str(label).strip() for label in labels if label), "")
 
 
+def _cache_is_fresh(path: str, params: dict | None = None) -> bool:
+    """Check whether a billable response can be reused without another API call."""
+    api_key = os.environ.get("ODDSPAPI_API_KEY", "").strip()
+    if not api_key:
+        return False
+    query_params = dict(params or {})
+    query_params["apiKey"] = api_key
+    url = BASE + "/" + path.lstrip("/") + "?" + urlencode(query_params)
+    with _LOCK:
+        cached = _CACHE.get(url)
+        return bool(cached and cached[0] > time.time())
+
+
+def _odds_by_tournament_rows(payload) -> list[dict]:
+    """Accept the documented fixture array and common wrapped/single-row variants."""
+    if isinstance(payload, list):
+        return [row for row in payload if isinstance(row, dict)]
+    if not isinstance(payload, dict):
+        return []
+    if payload.get("fixtureId") is not None:
+        return [payload]
+    for key in ("fixtures", "data", "results", "events"):
+        value = payload.get(key)
+        if isinstance(value, list):
+            return [row for row in value if isinstance(row, dict)]
+        if isinstance(value, dict) and value.get("fixtureId") is not None:
+            return [value]
+    return []
+
+
+def _empty_odds_result(
+    upcoming_count: int,
+    matching: list[dict],
+    available_competitions: list[str],
+    matching_competitions: list[str],
+    preferred_tournament_ids: set[str],
+    remaining: int,
+    selected_bookmakers: list[str],
+    warning: str,
+) -> dict:
+    return {
+        "count": upcoming_count,
+        "games": [],
+        "matching_fixture_count": len(matching),
+        "matching_fixtures_with_odds": 0,
+        "matching_competitions": matching_competitions,
+        "matching_tournament_ids": sorted({
+            str(x.get("tournamentId")) for x in matching if x.get("tournamentId") is not None
+        }),
+        "preferred_tournament_ids": sorted(preferred_tournament_ids),
+        "available_competitions": available_competitions,
+        "odds_fixtures_requested": 0,
+        "odds_fixtures_with_markets": 0,
+        "odds_requests_made": 0,
+        "odds_scan_method": "odds-by-tournaments",
+        "quota_remaining_before_scan": remaining,
+        "quota_remaining_after_scan": remaining,
+        "quota_blocked": True,
+        "provider_warning": warning,
+        "bookmakers_requested": selected_bookmakers,
+        "bookmakers_limit": len(selected_bookmakers),
+        "scan_cap": 0,
+        "markets_catalog_loaded": False,
+        "odds_data_audit": {
+            "bookmaker_boards": 0, "active_bookmaker_boards": 0,
+            "recognized_market_instances": 0, "active_prices": 0,
+            "fresh_prices": 0, "source_changes_within_1h": 0,
+            "source_changes_over_1h": 0, "source_timestamp_missing_or_invalid": 0,
+            "source_timestamp_future": 0, "parsed_outcomes": 0,
+            "outcomes_mapped_by_catalogue": 0, "outcomes_mapped_by_position": 0,
+            "lines_from_bookmaker_label": 0, "lines_from_catalogue": 0,
+            "missing_market_line": 0, "unparsed_outcomes": 0,
+            "missing_catalogue_outcome_ids": 0, "outcome_label_conflicts": 0,
+            "line_label_conflicts": 0, "duplicate_outcome_conflicts": 0,
+            "stale_prices": 0, "incomplete_bookmaker_market_pairs": 0,
+            "paired_quotes": 0, "normalized_market_groups": 0,
+        },
+    }
+
+
 def games(
     window_start: datetime,
     window_end: datetime,
     preferred_competitions: list[str] | None = None,
 ) -> dict:
+    """Fetch upcoming fixtures and bulk odds by tournament, not one call per fixture."""
     if (window_end - window_start) > timedelta(days=7):
         raise OddsPapiError("La ventana máxima de OddsPapi es de 7 días.", 422)
 
@@ -906,18 +987,15 @@ def games(
             422,
         )
 
-    # Select bookmaker slugs before requesting fixtures. OddsPapi can filter
-    # the fixture list by the exact bookmaker set, so we never fetch odds for
-    # unrelated leagues or matches without prices at those operators.
-    account = account_status()
+    account = account_status(force_refresh=True)
     available_bookmakers = account.get("bookmakers_available_in_plan") or []
-    selected_bookmakers = _select_bookmakers(available_bookmakers)
+    selected_bookmakers = _select_bookmakers(available_bookmakers)[:MAX_TOURNAMENT_BOOKMAKERS]
     if not selected_bookmakers:
         raise OddsPapiError(
             "OddsPapi no devolvió casas de apuestas habilitadas para esta suscripción."
         )
 
-    fixtures = _get("fixtures", {
+    fixture_params = {
         "sportId": SPORT_ID_BASKETBALL,
         "from": window_start.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
         "to": window_end.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
@@ -925,11 +1003,27 @@ def games(
         "hasOdds": "true",
         "bookmakers": ",".join(selected_bookmakers),
         "language": "en",
-    }, ttl=90)
+    }
+    fixtures_cached = _cache_is_fresh("fixtures", fixture_params)
+    markets_cached = _cache_is_fresh("markets", {"language": "en"})
+    requests_remaining = int(account.get("requests_remaining") or 0)
+    minimum_initial_requests = (0 if fixtures_cached else 1) + (0 if markets_cached else 1) + 2
+    if requests_remaining < minimum_initial_requests:
+        reason = (
+            "Cuota mensual insuficiente de OddsPapi: quedan "
+            f"{requests_remaining} solicitudes y se necesitan al menos "
+            f"{minimum_initial_requests} para consultar dos casas y conservar el consenso. "
+            "La cuota mensual se renueva el día 1; también podés ampliar el límite del plan."
+        )
+        return _empty_odds_result(
+            0, [], [], [], preferred_tournament_ids, requests_remaining,
+            selected_bookmakers, reason,
+        )
+
+    fixtures = _get("fixtures", fixture_params, ttl=90)
     if not isinstance(fixtures, list):
         raise OddsPapiError("OddsPapi devolvió un calendario con formato inesperado.")
 
-    now = datetime.now(timezone.utc)
     upcoming = [
         x for x in fixtures if isinstance(x, dict)
         and str(x.get("startTime") or "")
@@ -946,116 +1040,176 @@ def games(
     ]
     matching.sort(key=lambda x: str(x.get("startTime") or ""))
     available_competitions = sorted({
-        _fixture_competition_label(x)
-        for x in upcoming
-        if _fixture_competition_label(x)
+        _fixture_competition_label(x) for x in upcoming if _fixture_competition_label(x)
     })
     matching_competitions = sorted({
         _fixture_competition_label(x, preferred_keys)
-        for x in matching
-        if _fixture_competition_label(x, preferred_keys)
+        for x in matching if _fixture_competition_label(x, preferred_keys)
     })
 
-    remaining = int(account.get("requests_remaining") or 0)
-    # /fixtures and /markets each consume one request. Leave both reserved.
-    odds_limit = min(MAX_ODDS_FIXTURES_PER_RUN, max(0, remaining - 2))
-    selected = matching[:odds_limit]
-
-    # If no fixture belongs to the user's imported competitions, stop here.
-    # In particular, do not request /markets or odds for other tournaments.
-    if not selected:
+    if not matching:
         return {
-            "count": len(upcoming),
-            "games": [],
-            "matching_fixture_count": len(matching),
-            "matching_fixtures_with_odds": len(matching),
-            "matching_competitions": matching_competitions,
-            "matching_tournament_ids": sorted({
-                str(x.get("tournamentId")) for x in matching if x.get("tournamentId") is not None
-            }),
+            "count": len(upcoming), "games": [], "matching_fixture_count": 0,
+            "matching_fixtures_with_odds": 0, "matching_competitions": [],
+            "matching_tournament_ids": [],
             "preferred_tournament_ids": sorted(preferred_tournament_ids),
             "available_competitions": available_competitions,
-            "odds_fixtures_requested": 0,
-            "odds_fixtures_with_markets": 0,
-            "quota_remaining_before_scan": remaining,
-            "bookmakers_requested": selected_bookmakers,
-            "bookmakers_limit": MAX_BOOKMAKERS_PER_FIXTURE,
-            "scan_cap": MAX_ODDS_FIXTURES_PER_RUN,
-            "markets_catalog_loaded": False,
+            "odds_fixtures_requested": 0, "odds_fixtures_with_markets": 0,
+            "odds_requests_made": 0, "odds_scan_method": "odds-by-tournaments",
+            "quota_remaining_before_scan": requests_remaining,
+            "quota_remaining_after_scan": requests_remaining, "quota_blocked": False,
+            "provider_warning": "No hay partidos de las competiciones con historial local dentro de esta ventana.",
+            "bookmakers_requested": selected_bookmakers, "bookmakers_limit": len(selected_bookmakers),
+            "scan_cap": 0, "markets_catalog_loaded": False,
             "odds_data_audit": {
                 "bookmaker_boards": 0, "active_bookmaker_boards": 0,
                 "recognized_market_instances": 0, "active_prices": 0,
                 "fresh_prices": 0, "source_changes_within_1h": 0,
                 "source_changes_over_1h": 0, "source_timestamp_missing_or_invalid": 0,
-                "source_timestamp_future": 0,
-                "parsed_outcomes": 0, "outcomes_mapped_by_catalogue": 0,
-                "outcomes_mapped_by_position": 0, "lines_from_bookmaker_label": 0,
-                "lines_from_catalogue": 0, "missing_market_line": 0,
-                "unparsed_outcomes": 0, "missing_catalogue_outcome_ids": 0,
-                "outcome_label_conflicts": 0, "line_label_conflicts": 0,
-                "duplicate_outcome_conflicts": 0,
+                "source_timestamp_future": 0, "parsed_outcomes": 0,
+                "outcomes_mapped_by_catalogue": 0, "outcomes_mapped_by_position": 0,
+                "lines_from_bookmaker_label": 0, "lines_from_catalogue": 0,
+                "missing_market_line": 0, "unparsed_outcomes": 0,
+                "missing_catalogue_outcome_ids": 0, "outcome_label_conflicts": 0,
+                "line_label_conflicts": 0, "duplicate_outcome_conflicts": 0,
                 "stale_prices": 0, "incomplete_bookmaker_market_pairs": 0,
                 "paired_quotes": 0, "normalized_market_groups": 0,
             },
         }
 
-    market_families = _market_metadata()
-    # Reuse the cached /markets catalogue fetched above; this does not make
-    # an additional provider request when the cache is warm.
-    catalogue_audit = market_catalogue_audit()
-    normalized = []
-    audit_fields = (
-        "bookmaker_boards", "active_bookmaker_boards", "recognized_market_instances",
-        "active_prices", "fresh_prices", "source_changes_within_1h",
-        "source_changes_over_1h", "source_timestamp_missing_or_invalid",
-        "source_timestamp_future", "parsed_outcomes", "outcomes_mapped_by_catalogue",
-        "outcomes_mapped_by_position", "lines_from_bookmaker_label",
-        "lines_from_catalogue", "missing_market_line", "unparsed_outcomes",
-        "missing_catalogue_outcome_ids", "outcome_label_conflicts",
-        "line_label_conflicts", "duplicate_outcome_conflicts", "stale_prices",
-        "incomplete_bookmaker_market_pairs", "paired_quotes",
-        "normalized_market_groups",
-    )
-    odds_data_audit = {key: 0 for key in audit_fields}
-    for fixture in selected:
-        # Never cache the raw /odds payload: normalize one fixture at a time.
-        odds = _get(
-            "odds",
-            {
-                "fixtureId": fixture.get("fixtureId"),
-                "bookmakers": ",".join(selected_bookmakers),
-                "language": "en",
-                "verbosity": 3,
-            },
-            ttl=0,
+    tournament_ids = sorted({
+        str(x.get("tournamentId")) for x in matching
+        if x.get("tournamentId") is not None and str(x.get("tournamentId")).strip()
+    })
+    tournament_groups = [
+        tournament_ids[offset:offset + MAX_TOURNAMENT_IDS_PER_CALL]
+        for offset in range(0, len(tournament_ids), MAX_TOURNAMENT_IDS_PER_CALL)
+    ]
+    if not tournament_groups:
+        return _empty_odds_result(
+            len(upcoming), matching, available_competitions, matching_competitions,
+            preferred_tournament_ids, requests_remaining, selected_bookmakers,
+            "Los partidos compatibles no tienen tournamentId; OddsPapi no permite consultar sus cuotas en bloque.",
         )
-        if isinstance(odds, dict):
-            observed_at = datetime.now(timezone.utc)
-            normalized_fixture = _normalise_odds_fixture(fixture, odds, market_families, observed_at)
-            normalized.append(normalized_fixture)
-            for key in audit_fields:
-                odds_data_audit[key] += int((normalized_fixture.get("odds_audit") or {}).get(key) or 0)
-        del odds
-        time.sleep(0.55)
 
+    refreshed_account = account_status(force_refresh=True)
+    remaining_after_fixtures = int(refreshed_account.get("requests_remaining") or 0)
+    market_request_cost = 0 if _cache_is_fresh("markets", {"language": "en"}) else 1
+    available_odds_calls = max(0, remaining_after_fixtures - market_request_cost)
+    bookmaker_count = min(
+        MAX_TOURNAMENT_BOOKMAKERS,
+        available_odds_calls // len(tournament_groups),
+    )
+    if bookmaker_count < 2:
+        reason = (
+            "Cuota mensual insuficiente para verificar al menos dos casas en todos los torneos detectados. "
+            f"Quedan {remaining_after_fixtures} solicitudes después de consultar el calendario; "
+            "no se rebajó el requisito de consenso."
+        )
+        return _empty_odds_result(
+            len(upcoming), matching, available_competitions, matching_competitions,
+            preferred_tournament_ids, requests_remaining, selected_bookmakers, reason,
+        )
+
+    selected_bookmakers = selected_bookmakers[:bookmaker_count]
+    market_families = _market_metadata()
+    catalogue_audit = market_catalogue_audit()
+
+    matching_by_id = {
+        str(fixture.get("fixtureId") or ""): fixture
+        for fixture in matching if str(fixture.get("fixtureId") or "").strip()
+    }
+    merged_odds: dict[str, dict] = {}
+    odds_requests_made = 0
+    for bookmaker in selected_bookmakers:
+        for tournament_group in tournament_groups:
+            response = _get(
+                "odds-by-tournaments",
+                {
+                    "tournamentIds": ",".join(tournament_group),
+                    "bookmaker": bookmaker,
+                    "language": "en",
+                    "verbosity": 3,
+                },
+                ttl=30,
+            )
+            odds_requests_made += 1
+            # OddsPapi documents a 1-second cooldown for this bulk endpoint.
+            if odds_requests_made > 1:
+                time.sleep(1.05)
+            for row in _odds_by_tournament_rows(response):
+                fixture_id = str(row.get("fixtureId") or "").strip()
+                if fixture_id not in matching_by_id:
+                    continue
+                source_boards = row.get("bookmakerOdds") or {}
+                if not isinstance(source_boards, dict):
+                    continue
+                target = merged_odds.setdefault(fixture_id, {
+                    "bookmakerOdds": {},
+                    "updatedAt": row.get("updatedAt"),
+                })
+                if row.get("updatedAt") and (
+                    not target.get("updatedAt")
+                    or str(row.get("updatedAt")) > str(target.get("updatedAt"))
+                ):
+                    target["updatedAt"] = row.get("updatedAt")
+                for slug, board in source_boards.items():
+                    if not isinstance(board, dict):
+                        continue
+                    if str(slug).lower() != bookmaker.lower():
+                        continue
+                    target["bookmakerOdds"][slug] = board
+
+    now = datetime.now(timezone.utc)
+    normalized = []
+    odds_data_audit = {
+        "bookmaker_boards": 0, "active_bookmaker_boards": 0,
+        "recognized_market_instances": 0, "active_prices": 0,
+        "fresh_prices": 0, "source_changes_within_1h": 0,
+        "source_changes_over_1h": 0, "source_timestamp_missing_or_invalid": 0,
+        "source_timestamp_future": 0, "parsed_outcomes": 0,
+        "outcomes_mapped_by_catalogue": 0, "outcomes_mapped_by_position": 0,
+        "lines_from_bookmaker_label": 0, "lines_from_catalogue": 0,
+        "missing_market_line": 0, "unparsed_outcomes": 0,
+        "missing_catalogue_outcome_ids": 0, "outcome_label_conflicts": 0,
+        "line_label_conflicts": 0, "duplicate_outcome_conflicts": 0,
+        "stale_prices": 0, "incomplete_bookmaker_market_pairs": 0,
+        "paired_quotes": 0, "normalized_market_groups": 0,
+    }
+    for fixture_id, odds_payload in merged_odds.items():
+        fixture = matching_by_id[fixture_id]
+        result = _normalise_odds_fixture(fixture, odds_payload, market_families, now)
+        normalized.append(result)
+        for key in odds_data_audit:
+            odds_data_audit[key] += int((result.get("odds_audit") or {}).get(key) or 0)
+
+    normalized.sort(key=lambda item: str(item.get("start_time") or ""))
+    remaining_after_scan = int(account_status(force_refresh=True).get("requests_remaining") or 0)
+    fixtures_with_markets = sum(
+        bool((row.get("periods") or {}).get("ft")) for row in normalized
+    )
     return {
         "count": len(upcoming),
         "games": normalized,
         "matching_fixture_count": len(matching),
-        "matching_fixtures_with_odds": len(matching),
+        "matching_fixtures_with_odds": len(normalized),
         "matching_competitions": matching_competitions,
-        "matching_tournament_ids": sorted({
-            str(x.get("tournamentId")) for x in matching if x.get("tournamentId") is not None
-        }),
+        "matching_tournament_ids": sorted(tournament_ids),
         "preferred_tournament_ids": sorted(preferred_tournament_ids),
         "available_competitions": available_competitions,
-        "odds_fixtures_requested": len(selected),
-        "odds_fixtures_with_markets": sum(bool(x.get("periods", {}).get("ft")) for x in normalized),
-        "quota_remaining_before_scan": remaining,
+        "odds_fixtures_requested": len(merged_odds),
+        "odds_fixtures_with_markets": fixtures_with_markets,
+        "odds_requests_made": odds_requests_made,
+        "odds_scan_method": "odds-by-tournaments",
+        "quota_remaining_before_scan": requests_remaining,
+        "quota_remaining_after_scan": remaining_after_scan,
+        "quota_blocked": False,
+        "provider_warning": "",
         "bookmakers_requested": selected_bookmakers,
-        "bookmakers_limit": MAX_BOOKMAKERS_PER_FIXTURE,
-        "scan_cap": MAX_ODDS_FIXTURES_PER_RUN,
+        "bookmakers_limit": len(selected_bookmakers),
+        "scan_cap": len(normalized),
         "markets_catalog_loaded": True,
         "market_catalogue_audit": catalogue_audit,
         "odds_data_audit": odds_data_audit,
     }
+

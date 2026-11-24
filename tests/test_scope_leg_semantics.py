@@ -78,6 +78,12 @@ class ScopeAndLegProbabilityTests(unittest.TestCase):
     def test_team_names_are_normalized_without_dropping_ascii_characters(self):
         self.assertIn("replace(/[\\u0300-\\u036f]/g", HTML)
 
+    def test_odds_diagnostics_expose_quota_and_exact_history_deficits(self):
+        self.assertIn('"odds_requests_made": feed.get("odds_requests_made")', APP)
+        self.assertIn('"quota_remaining_after_scan": feed.get("quota_remaining_after_scan")', APP)
+        self.assertIn("Equipos por debajo del mínimo", HTML)
+        self.assertIn("quotaAndProvider", HTML)
+
     def test_probability_threshold_scope_is_explicit(self):
         self.assertIn('"minimum_estimated_leg_probability": MIN_ESTIMATED_LEG_PROBABILITY', APP)
         self.assertIn('"minimum_probability_scope": "each_parlay_leg_individually"', APP)
