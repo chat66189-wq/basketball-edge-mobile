@@ -1,6 +1,6 @@
 import unittest
 
-from app import MIN_PARLAY_JOINT_PROBABILITY, _best_automatic_parlay
+from parlay_optimizer import MIN_PARLAY_JOINT_PROBABILITY, best_automatic_parlay
 
 
 def _pick(event_id, market, probability, odds, *, strict=True):
@@ -29,7 +29,7 @@ class AutomaticParlayOptimizerTests(unittest.TestCase):
             _pick("event-2", "spread", 0.82, 2.00),
         ]
 
-        result, search = _best_automatic_parlay(picks, 4.00)
+        result, search = best_automatic_parlay(picks, 4.00)
 
         self.assertIsNotNone(result)
         self.assertAlmostEqual(result["combined_odds"], 4.00, places=6)
