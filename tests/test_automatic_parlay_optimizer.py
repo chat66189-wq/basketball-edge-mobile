@@ -43,7 +43,7 @@ class AutomaticParlayOptimizerTests(unittest.TestCase):
 
     def test_optimizer_never_uses_candidate_that_fails_strict_filters(self):
         picks = [_pick("event-1", "moneyline", 0.99, 4.00, strict=False)]
-        result, search = _best_automatic_parlay(picks, 4.00)
+        result, search = best_automatic_parlay(picks, 4.00)
         self.assertIsNone(result)
         self.assertEqual(search["strict_candidate_selections"], 0)
 
@@ -53,7 +53,7 @@ class AutomaticParlayOptimizerTests(unittest.TestCase):
             _pick("event-1", "spread", 0.94, 2.00),
             _pick("event-2", "moneyline", 0.80, 2.00),
         ]
-        result, _ = _best_automatic_parlay(picks, 4.00)
+        result, _ = best_automatic_parlay(picks, 4.00)
         self.assertIsNotNone(result)
         self.assertEqual(len(result["legs"]), 2)
         self.assertEqual(len({leg["event_id"] for leg in result["legs"]}), 2)
