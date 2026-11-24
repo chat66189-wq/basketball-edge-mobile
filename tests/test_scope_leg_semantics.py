@@ -71,6 +71,9 @@ class ScopeAndLegProbabilityTests(unittest.TestCase):
         self.assertIn("const fallbackDeficitLabels=hasShortHistory&&!deficits.length", HTML)
         self.assertIn("Volviendo a consultar cuotas y analizar los equipos", HTML)
 
+    def test_team_names_are_normalized_without_dropping_ascii_characters(self):
+        self.assertIn("replace(/[\\u0300-\\u036f]/g", HTML)
+
     def test_probability_threshold_scope_is_explicit(self):
         self.assertIn('"minimum_estimated_leg_probability": MIN_ESTIMATED_LEG_PROBABILITY', APP)
         self.assertIn('"minimum_probability_scope": "each_parlay_leg_individually"', APP)
