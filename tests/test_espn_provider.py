@@ -79,6 +79,34 @@ class ESPNProviderTests(unittest.TestCase):
         self.assertEqual(result["games"][0]["event_id"], "espn-event-123")
         self.assertEqual({row["team"] for row in result["team_stats"]}, {"Home Team", "Away Team"})
 
+    def test_sync_keeps_good_months_when_one_scoreboard_returns_invalid_json(self):
+        now = datetime.now(timezone.utc)
+        played = now - timedelta(days=10)
+        bad_month = "190001"
+        good_month = played.strftime("%Y%m")
+        event = _event(played)
+
+        def fake_get(path, params=None, ttl=3600):
+            if path.endswith("/scoreboard"):
+                if params.get("dates") == bad_month:
+                    raise espn_provider.ESPNError("invalid json", 502)
+                if params.get("dates") == good_month:
+                    return {"events": [event]}
+                return {"events": []}
+            if path.endswith("/summary"):
+                return _summary()
+            raise AssertionError(path)
+
+        with patch.object(espn_provider, "_month_keys", return_value=[bad_month, good_month]):
+            with patch.object(espn_provider, "_get_json", side_effect=fake_get):
+                result = espn_provider.sync("NBA", days=40, max_games_per_league=10)
+
+        self.assertEqual(result["games_received"], 1)
+        self.assertEqual(result["team_stats_rows"], 2)
+        self.assertEqual(result["failed_scoreboards"], 1)
+        self.assertTrue(any("calendarios mensuales no se pudieron leer" in warning
+                            for warning in result["warnings"]))
+
     def test_unsupported_competition_is_not_silently_mapped(self):
         result = espn_provider.sync("EuroLeague", days=10, max_games_per_league=10)
         self.assertEqual(result["games_received"], 0)

@@ -7,6 +7,7 @@ APP = (ROOT / "app.py").read_text(encoding="utf-8")
 HTML = (ROOT / "index.html").read_text(encoding="utf-8")
 SERVICE_WORKER = (ROOT / "sw.js").read_text(encoding="utf-8")
 ODDSPAPI = (ROOT / "oddspapi_provider.py").read_text(encoding="utf-8")
+OPTIMIZER = (ROOT / "parlay_optimizer.py").read_text(encoding="utf-8")
 
 
 class StrictParlayPolicyTests(unittest.TestCase):
@@ -19,6 +20,11 @@ class StrictParlayPolicyTests(unittest.TestCase):
         self.assertIn("MIN_ESTIMATED_LEG_PROBABILITY = 0.70", APP)
         self.assertIn("MIN_RAW_MODEL_PROBABILITY = 0.72", APP)
         self.assertIn('"conservative_probability_below_70pct"', APP)
+
+    def test_automatic_search_uses_alternative_aware_grouped_optimizer(self):
+        self.assertIn("strict_best_parlay, parlay_search_diagnostics = best_automatic_parlay(", APP)
+        self.assertIn('"parlay_search": parlay_search_diagnostics', APP)
+        self.assertIn("grouped_log_odds_dynamic_programming", OPTIMIZER)
 
     def test_two_bookmaker_paired_consensus_is_required(self):
         self.assertIn("MIN_AUTOMATIC_BOOKMAKER_CONSENSUS = 2", APP)
@@ -33,8 +39,8 @@ class StrictParlayPolicyTests(unittest.TestCase):
 
     def test_joint_parlay_estimate_has_a_thirty_percent_floor(self):
         self.assertIn("MIN_PARLAY_JOINT_PROBABILITY = 0.30", APP)
-        self.assertIn("if hit_probability < MIN_PARLAY_JOINT_PROBABILITY:", APP)
-        self.assertIn('"minimum_joint_probability": MIN_PARLAY_JOINT_PROBABILITY', APP)
+        self.assertIn("if hit_probability < MIN_PARLAY_JOINT_PROBABILITY:", OPTIMIZER)
+        self.assertIn('"minimum_joint_probability": MIN_PARLAY_JOINT_PROBABILITY', OPTIMIZER)
 
     def test_consensus_breakdown_is_reported(self):
         self.assertIn("bookmaker_groups_1_house", APP)
@@ -56,7 +62,7 @@ class StrictParlayPolicyTests(unittest.TestCase):
         self.assertIn("if(label.startsWith('nbagleague'))return 'nbagleague'", HTML)
 
     def test_service_worker_refreshes_navigation_and_invalidates_prior_cache(self):
-        self.assertIn("basketball-edge-v35-oddspapi-catalogue-safe", SERVICE_WORKER)
+        self.assertIn("basketball-edge-v36-espn-resilient-parlay-search", SERVICE_WORKER)
         self.assertIn("event.request.mode==='navigate'", SERVICE_WORKER)
 
 

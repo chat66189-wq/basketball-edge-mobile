@@ -23,6 +23,7 @@ _LOCK = threading.Lock()
 MAX_MONTHS = 14
 MAX_EVENTS_PER_LEAGUE = 240
 MAX_WORKERS = 6
+MAX_RESPONSE_BYTES = 32 * 1024 * 1024
 
 # Only mappings that can be kept separate from the imported competition scope.
 LEAGUES = {
@@ -82,27 +83,47 @@ def _get_json(path: str, params: dict | None = None, ttl: int = 3600) -> dict:
         cached = _CACHE.get(url)
         if ttl and cached and cached[0] > now:
             return cached[1]
-    try:
-        request = Request(
-            url,
-            headers={
-                "Accept": "application/json",
-                "User-Agent": "BasketballEdgeAnalyst/20 (public scoreboard enrichment)",
-            },
-            method="GET",
-        )
-        with urlopen(request, timeout=20) as response:
-            data = json.loads(response.read(8 * 1024 * 1024).decode("utf-8"))
-    except HTTPError as exc:
-        if exc.code in (400, 404):
-            raise ESPNError("ESPN no ofrece ese calendario o resumen para la liga solicitada.", 404) from exc
-        if exc.code in (403, 429):
-            raise ESPNError("ESPN limitó temporalmente la consulta; se conservaron los datos existentes.", 429) from exc
-        raise ESPNError("ESPN respondió HTTP " + str(exc.code) + ".", 502) from exc
-    except (URLError, TimeoutError):
-        raise ESPNError("No se pudo conectar con el servicio público de ESPN.") from None
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        raise ESPNError("ESPN devolvió una respuesta JSON inválida.") from None
+    data = None
+    for attempt in range(2):
+        try:
+            request = Request(
+                url,
+                headers={
+                    "Accept": "application/json",
+                    "User-Agent": "BasketballEdgeAnalyst/20 (public scoreboard enrichment)",
+                },
+                method="GET",
+            )
+            with urlopen(request, timeout=20) as response:
+                raw = response.read(MAX_RESPONSE_BYTES + 1)
+            if len(raw) > MAX_RESPONSE_BYTES:
+                raise ESPNError(
+                    "La respuesta de ESPN superó el límite seguro de 32 MB; se omitió este calendario.",
+                    502,
+                )
+            probe = raw.lstrip()
+            if probe.startswith(bytes((239, 187, 191))):
+                probe = probe[3:].lstrip()
+            if not probe or not probe.startswith((b"{", b"[")):
+                raise json.JSONDecodeError("empty or non-JSON response", raw.decode("utf-8", "replace"), 0)
+            data = json.loads(raw.decode("utf-8-sig"))
+            break
+        except HTTPError as exc:
+            if exc.code in (400, 404):
+                raise ESPNError("ESPN no ofrece ese calendario o resumen para la liga solicitada.", 404) from exc
+            if exc.code in (403, 429):
+                raise ESPNError("ESPN limitó temporalmente la consulta; se conservaron los datos existentes.", 429) from exc
+            raise ESPNError("ESPN respondió HTTP " + str(exc.code) + ".", 502) from exc
+        except (URLError, TimeoutError):
+            raise ESPNError("No se pudo conectar con el servicio público de ESPN.") from None
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            if attempt == 0:
+                time.sleep(0.35)
+                continue
+            raise ESPNError(
+                "ESPN devolvió una respuesta JSON inválida o una página no JSON después de reintentar.",
+                502,
+            ) from None
     if not isinstance(data, dict):
         raise ESPNError("ESPN devolvió un formato JSON inesperado.")
     if ttl:
@@ -349,6 +370,7 @@ def sync(competitions: str, days: int = 400, max_games_per_league: int = 180) ->
     all_stats = []
     total_events_seen = 0
     failed_summaries = 0
+    failed_scoreboards = 0
     incomplete_boxscores = 0
     for key, spec in selected:
         event_index = {}
@@ -365,7 +387,13 @@ def sync(competitions: str, days: int = 400, max_games_per_league: int = 180) ->
                 except ESPNError as exc:
                     if exc.status == 404:
                         continue
-                    raise
+                    if exc.status == 429:
+                        raise
+                    failed_scoreboards += 1
+                    continue
+                except Exception:
+                    failed_scoreboards += 1
+                    continue
                 events = scoreboard.get("events") or []
                 if not isinstance(events, list):
                     continue
@@ -411,6 +439,11 @@ def sync(competitions: str, days: int = 400, max_games_per_league: int = 180) ->
     ]
     if unsupported:
         warnings.append("Competiciones sin cobertura ESPN mapeada: " + ", ".join(sorted(set(unsupported))) + ".")
+    if failed_scoreboards:
+        warnings.append(
+            str(failed_scoreboards)
+            + " calendarios mensuales no se pudieron leer; se omitieron y se conservaron los demás meses y ligas."
+        )
     if incomplete_boxscores:
         warnings.append(str(incomplete_boxscores) + " partidos no tenían box score completo de ambos equipos y se excluyeron.")
     if failed_summaries:
@@ -425,6 +458,7 @@ def sync(competitions: str, days: int = 400, max_games_per_league: int = 180) ->
         "games_received": len(all_games),
         "complete_boxscore_games": len(complete_ids),
         "team_stats_rows": len(all_stats),
+        "failed_scoreboards": failed_scoreboards,
         "incomplete_boxscores_excluded": incomplete_boxscores,
         "failed_summaries": failed_summaries,
         "games": all_games,

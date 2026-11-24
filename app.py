@@ -17,6 +17,7 @@ from typing import Any
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.concurrency import run_in_threadpool
+from parlay_optimizer import best_automatic_parlay
 
 BASE_DIR = Path(__file__).resolve().parent
 ENGINE_BUNDLE = BASE_DIR / "engine_bundle.zip"
@@ -46,7 +47,7 @@ from scripts.edge_v15.market_pricing import price_game_market, ev_per_unit  # no
 app = FastAPI(
     title="Basketball Edge Analyst v20 API",
     description="Adaptador web para el motor de proyección y simulación BEA. Las salidas son exploratorias, no picks validados.",
-    version="20.3.0-oddspapi-catalogue-safe",
+    version="20.4.0-espn-resilient-parlay-search",
 )
 
 frontend_origin = os.environ.get("FRONTEND_ORIGIN", "https://chat66189-wq.github.io")
@@ -122,6 +123,7 @@ def _parlay_rank(hit_probability: float, combined_odds: float,
     """Prefer the highest joint estimate, then the closest price to target."""
     relative_distance = abs(combined_odds - target_odds) / target_odds
     return (hit_probability, -relative_distance, -leg_count)
+
 
 
 def _simulate_game_for_settlement(projection, *, simulations: int, seed: int,
@@ -1624,6 +1626,7 @@ async def recommend_bookmaker_parlay(request: Request):
             "minimum_history_games": minimum_history,
             "top_picks": top_picks,
             "best_parlay": best_parlay,
+            "parlay_search": parlay_search_diagnostics,
             "warnings": warnings,
             "provider": house + " (cuotas manuales)",
         }
@@ -1810,61 +1813,13 @@ async def recommend_parlay(request: Request):
                 reverse=True,
             )[:12]
 
-        def _best_parlay(source: list[dict]) -> dict | None:
-            by_bookmaker: dict[str, list[dict]] = {}
-            for candidate in source:
-                by_bookmaker.setdefault(candidate["bookmaker"], []).append(candidate)
-            best = None
-            target_min, target_max = _parlay_odds_band(target_odds)
-            for bookmaker, items in by_bookmaker.items():
-                per_game = {}
-                for item in items:
-                    old = per_game.get(item["event_id"])
-                    if old is None or (
-                        item["probability"], item["edge_percentage_points"], item["score"]
-                    ) > (old["probability"], old["edge_percentage_points"], old["score"]):
-                        per_game[item["event_id"]] = item
-                pool = sorted(
-                    per_game.values(),
-                    key=lambda x: (x["probability"], x["edge_percentage_points"], x["score"]),
-                    reverse=True,
-                )[:18]
-                local_best = None
-                for leg_count in range(1, min(8, len(pool)) + 1):
-                    for combo in combinations(pool, leg_count):
-                        combined_odds = math.prod(x["odds"] for x in combo)
-                        if combined_odds < target_min - 1e-9 or combined_odds > target_max + 1e-9:
-                            continue
-                        hit_probability = math.prod(x["probability"] for x in combo)
-                        if hit_probability < MIN_PARLAY_JOINT_PROBABILITY:
-                            continue
-                        rank = _parlay_rank(hit_probability, combined_odds, target_odds, leg_count)
-                        if local_best is None or rank > local_best["rank"]:
-                            local_best = {
-                                "rank": rank,
-                                "bookmaker": bookmaker,
-                                "combined_odds": combined_odds,
-                                "target_odds": target_odds,
-                                "target_odds_min": target_min,
-                                "target_odds_max": target_max,
-                                "odds_deviation": combined_odds - target_odds,
-                                "odds_deviation_percent": ((combined_odds / target_odds) - 1.0) * 100.0,
-                                "estimated_hit_probability": hit_probability,
-                                "minimum_joint_probability": MIN_PARLAY_JOINT_PROBABILITY,
-                                "joint_probability_method": "product_of_leg_estimates_assuming_approximate_independence",
-                                "legs": list(combo),
-                            }
-                if local_best and (best is None or local_best["rank"] > best["rank"]):
-                    best = local_best
-            return best
-
-        strict_best_parlay = _best_parlay(strict_candidates)
+        strict_best_parlay, parlay_search_diagnostics = best_automatic_parlay(
+            strict_candidates, target_odds
+        )
         best_effort_fallback_attempted = bool(best_effort_requested and strict_best_parlay is None)
         active_candidates = all_candidates if best_effort_fallback_attempted else strict_candidates
         top_picks = _top_picks(active_candidates)
-        best_parlay = (
-            _best_parlay(active_candidates) if best_effort_fallback_attempted else strict_best_parlay
-        )
+        best_parlay = strict_best_parlay
 
         if best_parlay:
             best_parlay.pop("rank", None)
