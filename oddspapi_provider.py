@@ -7,6 +7,7 @@ the provider's monthly request quota.
 from __future__ import annotations
 
 import json
+import math
 import codecs
 import os
 import re
@@ -114,12 +115,26 @@ def _read_basketball_market_array(response, max_bytes: int = 128 * 1024 * 1024) 
                     # OddsPapi's period labels are not consistent across all
                     # basketball market rows. Trust the full-game market name,
                     # but reject any period explicitly marked as a half/quarter.
-                    if family and _is_full_game_period(period):
+                    # A basketball match market is a two-outcome market on the
+                    # final-result period. Preserve the catalogue fields required
+                    # to resolve outcome IDs and alternate lines later; dropping
+                    # handicap/outcomes here makes correct normalization impossible.
+                    try:
+                        market_length = int(item.get("marketLength") or 0)
+                    except (TypeError, ValueError):
+                        market_length = 0
+                    if (
+                        family
+                        and _is_full_game_period(period)
+                        and item.get("playerProp") is False
+                        and market_length == 2
+                    ):
                         selected.append({
-                            "sportId": SPORT_ID_BASKETBALL,
-                            "marketId": item.get("marketId"),
-                            "marketName": market_name,
-                            "period": period,
+                            key: item.get(key)
+                            for key in (
+                                "sportId", "marketId", "marketName", "marketLength",
+                                "playerProp", "handicap", "period", "marketType", "outcomes",
+                            )
                         })
                 pos = end
                 expect_value = False
@@ -309,60 +324,56 @@ def _parse_label(raw: str) -> tuple[str, float | None] | None:
     return None
 
 def _is_full_game_period(value: str) -> bool:
+    """Only the basketball final-result period is eligible for these match markets."""
     period = re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
-    if not period:
-        return True
-    # Explicitly reject quarter/half markets, including common short labels.
-    if any(token in period for token in ("half", "quarter", "1h", "2h", "1q", "2q", "3q", "4q")):
-        return False
-    if period in {"h1", "h2", "q1", "q2", "q3", "q4", "1st", "2nd", "3rd", "4th"}:
-        return False
-    # Accept documented labels plus provider-specific full-game aliases. The
-    # market family name is independently checked before this helper is used.
-    return True
+    # OddsPapi's basketball catalogue uses 'result' for the final score with
+    # overtime. Regulation-only result markets use another market family and
+    # must not be merged into this settlement scope.
+    return period == "result"
 
 
 def _market_family(name: str) -> str | None:
+    """Recognize only the three exact two-way full-game basketball families."""
     label = re.sub(r"[^a-z0-9]+", " ", str(name or "").lower()).strip()
-    # Names for half/quarter markets sometimes also say "incl. overtime";
-    # never mistake those for full-game match markets.
-    period_markers = (
-        "first half", "second half", "first quarter", "second quarter",
-        "third quarter", "fourth quarter", "1st half", "2nd half",
-        "1st quarter", "2nd quarter", "3rd quarter", "4th quarter",
-        "first period", "second period", "quarter", "half",
-    )
-    if any(marker in label for marker in period_markers):
-        return None
-    includes_overtime = any(token in label for token in (
-        "overtime", "incl ot", "extra time", "extra period",
-    ))
-    if "winner" in label and includes_overtime:
-        return "moneyline"
-    if "over under" in label and includes_overtime:
-        return "total"
-    if "handicap" in label and includes_overtime:
-        return "spread"
-    return None
+    aliases = {
+        "winner incl overtime": "moneyline",
+        "winner including overtime": "moneyline",
+        "over under incl overtime": "total",
+        "over under including overtime": "total",
+        "handicap incl overtime": "spread",
+        "handicap including overtime": "spread",
+    }
+    return aliases.get(label)
 
 
 def _market_metadata() -> dict[str, dict]:
-    """Read market family, line and canonical outcome names from OddsPapi's catalogue."""
+    """Load exact two-way full-game basketball market metadata from OddsPapi."""
     data = _get("markets", {"language": "en"}, ttl=86400)
     if not isinstance(data, list):
         raise OddsPapiError("El catálogo de mercados de OddsPapi tiene un formato inesperado.")
     result: dict[str, dict] = {}
     for row in data:
-        if not isinstance(row, dict) or int(row.get("sportId") or 0) != SPORT_ID_BASKETBALL:
+        if not isinstance(row, dict) or str(row.get("sportId") or "") != str(SPORT_ID_BASKETBALL):
             continue
         family = _market_family(row.get("marketName"))
         if not family or not _is_full_game_period(str(row.get("period") or "")):
             continue
-        raw_handicap = row.get("handicap")
+        if row.get("playerProp") is not False:
+            continue
         try:
+            if int(row.get("marketLength") or 0) != 2:
+                continue
+        except (TypeError, ValueError):
+            continue
+
+        try:
+            raw_handicap = row.get("handicap")
             handicap = float(raw_handicap) if raw_handicap not in (None, "") else None
         except (TypeError, ValueError):
             handicap = None
+        if handicap is not None and not math.isfinite(handicap):
+            handicap = None
+
         outcomes: dict[str, str] = {}
         raw_outcomes = row.get("outcomes") or []
         if isinstance(raw_outcomes, list):
@@ -375,10 +386,28 @@ def _market_metadata() -> dict[str, dict]:
                     outcomes[str(outcome_id)] = str(outcome.get("outcomeName") or "")
                 elif outcome is not None:
                     outcomes[str(outcome_id)] = str(outcome)
-        result[str(row.get("marketId"))] = {
+
+        expected = {"home", "away"} if family in {"moneyline", "spread"} else {"over", "under"}
+        canonical_sides = {
+            parsed[0] for label in outcomes.values()
+            if (parsed := _parse_label(label)) is not None
+            and parsed[0] in expected
+        }
+        if len(outcomes) != 2 or canonical_sides != expected:
+            continue
+        if family in {"total", "spread"} and handicap is None:
+            continue
+
+        market_id = row.get("marketId")
+        if market_id is None:
+            continue
+        result[str(market_id)] = {
             "family": family,
             "handicap": handicap,
             "outcomes": outcomes,
+            "market_name": str(row.get("marketName") or ""),
+            "period": str(row.get("period") or ""),
+            "market_type": str(row.get("marketType") or ""),
         }
     return result
 
@@ -486,10 +515,11 @@ def _source_timestamp_age(value: str | None, now: datetime) -> float | None:
 
 
 def _normalise_odds_fixture(fixture: dict, odds: dict, market_families: dict[str, dict], now: datetime) -> dict:
-    """Normalize active paired bookmaker prices using OddsPapi's documented outcome ordering."""
+    """Normalize only catalogue-matched, two-sided quotes on identical lines."""
     home = str(fixture.get("participant1Name") or "").strip()
     away = str(fixture.get("participant2Name") or "").strip()
-    groups: dict[tuple, dict[str, dict]] = {}
+    groups: dict[tuple, dict[str, dict[str, dict]]] = {}
+    conflicted_pairs: set[tuple] = set()
     boards = (odds or {}).get("bookmakerOdds") or {}
     audit = {
         "bookmaker_boards": len(boards) if isinstance(boards, dict) else 0,
@@ -508,6 +538,10 @@ def _normalise_odds_fixture(fixture: dict, odds: dict, market_families: dict[str
         "lines_from_catalogue": 0,
         "missing_market_line": 0,
         "unparsed_outcomes": 0,
+        "missing_catalogue_outcome_ids": 0,
+        "outcome_label_conflicts": 0,
+        "line_label_conflicts": 0,
+        "duplicate_outcome_conflicts": 0,
         "stale_prices": 0,
         "incomplete_bookmaker_market_pairs": 0,
         "paired_quotes": 0,
@@ -534,12 +568,24 @@ def _normalise_odds_fixture(fixture: dict, odds: dict, market_families: dict[str
             audit["recognized_market_instances"] += 1
 
             raw_outcomes = market.get("outcomes") or {}
-            if not isinstance(raw_outcomes, dict):
+            if not isinstance(raw_outcomes, dict) or len(raw_outcomes) != 2:
+                audit["incomplete_bookmaker_market_pairs"] += 1
                 continue
-            outcome_ids = list(raw_outcomes.keys())
-            ordered_sides = ("home", "away") if family in {"moneyline", "spread"} else ("over", "under")
+            allowed_sides = {"home", "away"} if family in {"moneyline", "spread"} else {"over", "under"}
+            expected = ("home", "away") if family in {"moneyline", "spread"} else ("over", "under")
 
-            for position, (outcome_id, outcome) in enumerate(raw_outcomes.items()):
+            market_line = None
+            if family != "moneyline":
+                try:
+                    market_line = float(metadata.get("handicap"))
+                except (TypeError, ValueError):
+                    market_line = None
+                if market_line is None or not math.isfinite(market_line):
+                    audit["missing_market_line"] += len(raw_outcomes)
+                    continue
+                market_line = round(market_line, 2)
+
+            for outcome_id, outcome in raw_outcomes.items():
                 if not isinstance(outcome, dict):
                     continue
                 players = outcome.get("players") or {}
@@ -550,14 +596,13 @@ def _normalise_odds_fixture(fixture: dict, odds: dict, market_families: dict[str
                     price = float(player.get("price"))
                 except (TypeError, ValueError):
                     continue
-                if not (1.0001 < price < 1000):
+                if not math.isfinite(price) or not (1.0001 < price < 1000):
                     continue
                 audit["active_prices"] += 1
 
                 changed = player.get("changedAt") or player.get("bookmakerChangedAt") or (odds or {}).get("updatedAt")
-                # changedAt is the last PRICE CHANGE, not the time this live
-                # /odds response was captured. An unchanged active price is
-                # still the current quote returned by this request.
+                # changedAt is the last price movement, not the observation time.
+                # A quote returned by this fresh /odds request is captured now.
                 observed_at = now.astimezone(timezone.utc).isoformat()
                 audit["fresh_prices"] += 1
                 source_age = _source_timestamp_age(changed, now)
@@ -570,76 +615,89 @@ def _normalise_odds_fixture(fixture: dict, odds: dict, market_families: dict[str
                 else:
                     audit["source_changes_over_1h"] += 1
 
-                allowed_sides = set(ordered_sides)
-                parsed = _parse_label(player.get("bookmakerOutcomeId"))
-                source = "bookmaker"
-                if parsed is None or parsed[0] not in allowed_sides:
-                    catalogue_label = (metadata.get("outcomes") or {}).get(str(outcome_id))
-                    parsed = _parse_label(catalogue_label)
-                    source = "catalogue"
+                catalogue_label = (metadata.get("outcomes") or {}).get(str(outcome_id))
+                catalogue_parsed = _parse_label(catalogue_label) if catalogue_label else None
+                bookmaker_parsed = _parse_label(player.get("bookmakerOutcomeId"))
 
-                # OddsPapi's basketball examples explicitly use outcome order
-                # for two-way moneylines when a bookmaker sends opaque numeric
-                # bookmakerOutcomeId values. Apply the same documented order to
-                # full-game two-way spread/total markets only as a last fallback.
-                if parsed is None or parsed[0] not in allowed_sides:
-                    if position < len(ordered_sides) and len(outcome_ids) == 2:
-                        parsed = (ordered_sides[position], None)
-                        source = "position"
-                    else:
-                        audit["unparsed_outcomes"] += 1
-                        continue
+                # outcomeId -> outcomeName in /markets is the authoritative mapping.
+                # bookmakerOutcomeId may corroborate it, but array/dict position
+                # is never a safe substitute: order changes across alternate lines.
+                parsed = None
+                source = None
+                if catalogue_parsed is not None and catalogue_parsed[0] in allowed_sides:
+                    parsed = catalogue_parsed
+                    source = "catalogue"
+                    if bookmaker_parsed is not None and bookmaker_parsed[0] in allowed_sides:
+                        if bookmaker_parsed[0] != catalogue_parsed[0]:
+                            audit["outcome_label_conflicts"] += 1
+                            continue
+                elif bookmaker_parsed is not None and bookmaker_parsed[0] in allowed_sides:
+                    parsed = bookmaker_parsed
+                    source = "bookmaker"
+                else:
+                    if catalogue_label is None:
+                        audit["missing_catalogue_outcome_ids"] += 1
+                    audit["unparsed_outcomes"] += 1
+                    continue
 
                 side, raw_line = parsed
+                if family != "moneyline" and raw_line is not None:
+                    expected_label_line = market_line
+                    if family == "spread" and side == "away":
+                        expected_label_line = -market_line
+                    if abs(float(raw_line) - expected_label_line) > 0.001:
+                        audit["line_label_conflicts"] += 1
+                        continue
+
                 audit["parsed_outcomes"] += 1
                 if source == "catalogue":
                     audit["outcomes_mapped_by_catalogue"] += 1
-                elif source == "position":
-                    audit["outcomes_mapped_by_position"] += 1
-
                 if raw_line is not None:
                     audit["lines_from_bookmaker_label"] += 1
+                if family != "moneyline":
+                    audit["lines_from_catalogue"] += 1
+                line = None if family == "moneyline" else market_line
 
-                if family == "moneyline":
-                    line = None
-                elif family == "total":
-                    line_value = raw_line if raw_line is not None else metadata.get("handicap")
-                    if line_value is None:
-                        audit["missing_market_line"] += 1
-                        continue
-                    if raw_line is None:
-                        audit["lines_from_catalogue"] += 1
-                    line = round(float(line_value), 2)
-                else:
-                    if raw_line is not None:
-                        line_value = raw_line if side == "home" else -raw_line
-                    else:
-                        line_value = metadata.get("handicap")
-                    if line_value is None:
-                        audit["missing_market_line"] += 1
-                        continue
-                    if raw_line is None:
-                        audit["lines_from_catalogue"] += 1
-                    line = round(float(line_value), 2)
-
-                key = (family, line)
-                groups.setdefault(key, {}).setdefault(str(bookmaker), {})[side] = {
+                group_key = (family, line)
+                pair_key = (group_key, str(bookmaker))
+                if pair_key in conflicted_pairs:
+                    continue
+                by_book = groups.setdefault(group_key, {}).setdefault(str(bookmaker), {})
+                existing = by_book.get(side)
+                quote = {
                     "price": price,
                     "captured_at": observed_at,
                     "source_changed_at": str(changed or ""),
+                    "source_market_id": str(market_id),
+                    "source_outcome_id": str(outcome_id),
                 }
+                if existing is not None:
+                    # Never let a second market definition silently overwrite a
+                    # different price for the same book/side/line.
+                    if abs(existing["price"] - price) > 1e-9:
+                        audit["duplicate_outcome_conflicts"] += 1
+                        by_book.clear()
+                        conflicted_pairs.add(pair_key)
+                    continue
+                by_book[side] = quote
 
     ft: dict[str, dict] = {}
     for (family, line), by_book in groups.items():
         api_name = {"moneyline": "moneyline", "spread": "spread", "total": "total"}[family]
         for bookmaker, sides in by_book.items():
+            if not all(side in sides for side in expected if False):
+                pass
             required = ("home", "away") if family in {"moneyline", "spread"} else ("over", "under")
             if not all(side in sides for side in required):
                 audit["incomplete_bookmaker_market_pairs"] += 1
                 continue
             captured = min(sides[x]["captured_at"] for x in required)
-            entry = {"line": line, required[0]: sides[required[0]]["price"],
-                     required[1]: sides[required[1]]["price"], "captured_at": captured}
+            entry = {
+                "line": line,
+                required[0]: sides[required[0]]["price"],
+                required[1]: sides[required[1]]["price"],
+                "captured_at": captured,
+            }
             ft.setdefault(bookmaker, {}).setdefault(api_name, []).append(entry)
             audit["paired_quotes"] += 1
 
@@ -668,6 +726,7 @@ def _normalise_odds_fixture(fixture: dict, odds: dict, market_families: dict[str
         "oddspapi_fixture_id": fixture.get("fixtureId"),
         "settlement_scope": "includes_overtime",
     }
+
 
 def _competition_key(value: str) -> str:
     """Canonicalize exact league identity without merging genders or NCAA divisions."""
