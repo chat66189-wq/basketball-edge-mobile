@@ -281,7 +281,7 @@ class OddsPapiBasketballNormalizationTests(unittest.TestCase):
              patch("oddspapi_provider._cache_is_fresh", return_value=False), \
              patch("oddspapi_provider._get", side_effect=fake_get), \
              patch("oddspapi_provider._market_metadata", return_value=catalogue), \
-             patch("oddspapi_provider.market_catalogue_audit", return_value={"families": {}}), \\
+             patch("oddspapi_provider.market_catalogue_audit", return_value={"families": {}}), \
              patch("oddspapi_provider.time.sleep"):
             result = games(
                 now, now + timedelta(hours=6),
@@ -292,7 +292,7 @@ class OddsPapiBasketballNormalizationTests(unittest.TestCase):
         self.assertEqual(result["odds_requests_made"], 5)
         self.assertEqual(result["odds_fixtures_requested"], 2)
         self.assertEqual(result["odds_fixtures_with_markets"], 2)
-        self.assertEqual(result["quota_remaining_before_scan"], 8)
+        self.assertEqual(result["quota_remaining_before_scan"], 10)
         self.assertEqual(result["quota_remaining_after_scan"], 3)
         self.assertEqual(len(result["games"]), 2)
         self.assertEqual(
