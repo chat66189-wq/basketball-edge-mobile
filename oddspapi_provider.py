@@ -547,9 +547,9 @@ def _select_bookmakers(available_bookmakers: list[str]) -> list[str]:
         slug = exact.get(preferred.lower())
         if slug and slug not in chosen:
             chosen.append(slug)
-        if len(chosen) >= MAX_BOOKMAKERS_PER_FIXTURE:
+        if len(chosen) >= MAX_TOURNAMENT_BOOKMAKERS:
             break
-    if len(chosen) < MAX_BOOKMAKERS_PER_FIXTURE:
+    if len(chosen) < MAX_TOURNAMENT_BOOKMAKERS:
         # Fill from the user's actual subscription, preferring sportsbook
         # slugs and excluding obvious casino-only entries.
         remainder = sorted(
@@ -560,8 +560,8 @@ def _select_bookmakers(available_bookmakers: list[str]) -> list[str]:
             ),
             key=str.lower,
         )
-        chosen.extend(remainder[:MAX_BOOKMAKERS_PER_FIXTURE - len(chosen)])
-    return chosen[:MAX_BOOKMAKERS_PER_FIXTURE]
+        chosen.extend(remainder[:MAX_TOURNAMENT_BOOKMAKERS - len(chosen)])
+    return chosen[:MAX_TOURNAMENT_BOOKMAKERS]
 
 
 def _source_timestamp_age(value: str | None, now: datetime) -> float | None:
@@ -1134,6 +1134,9 @@ def games(
                 ttl=30,
             )
             odds_requests_made += 1
+            # OddsPapi documents a 1-second cooldown for this bulk endpoint.
+            if odds_requests_made > 1:
+                time.sleep(1.05)
             for row in _odds_by_tournament_rows(response):
                 fixture_id = str(row.get("fixtureId") or "").strip()
                 if fixture_id not in matching_by_id:
