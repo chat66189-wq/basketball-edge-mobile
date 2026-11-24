@@ -47,7 +47,7 @@ from scripts.edge_v15.market_pricing import price_game_market, ev_per_unit  # no
 app = FastAPI(
     title="Basketball Edge Analyst v20 API",
     description="Adaptador web para el motor de proyección y simulación BEA. Las salidas son exploratorias, no picks validados.",
-    version="20.4.0-espn-resilient-parlay-search",
+    version="20.5.0-batched-history-correct-fixture-scope",
 )
 
 frontend_origin = os.environ.get("FRONTEND_ORIGIN", "https://chat66189-wq.github.io")
@@ -1833,6 +1833,7 @@ async def recommend_parlay(request: Request):
         warnings = [
             "EXPLORATORY_NOT_VALIDATED: el modelo no tiene validación walk-forward/holdout aprobada; el 70% no está calibrado ni es una tasa de acierto demostrada.",
             ("El modelo simula prórrogas de forma aproximada para mercados que las incluyen; no equivale a una liquidación oficial exacta." if provider_name == "OddsPapi" else "El modelo base simula tiempo reglamentario; las cuotas FT de HoopsAPI incluyen prórroga. La comparación de probabilidades no es perfectamente equivalente."),
+            "El 70% mínimo se exige a CADA pick individual de la combinada; no se exige 70% al conjunto. La probabilidad conjunta estimada de toda la combinada tiene un mínimo separado del 30%.",
             "Filtro reforzado: cada pierna debe superar 70% conservador; parte de un descuento base de 2 pp y suma ajustes transparentes de hasta 0,5 pp por muestra corta, consenso de solo 2 casas, dispersión y antigüedad de cuota. Exige simulación bruta >=72%, mercado sin margen >=60% y brecha modelo-mercado <=12 pp.",
             "El análisis automático exige precios emparejados de al menos 2 casas y dispersión máxima de 4 puntos porcentuales entre ellas.",
             "Se exigen al menos 12 partidos históricos completos por equipo y cuotas capturadas en los últimos 15 minutos.",
@@ -1922,10 +1923,8 @@ async def recommend_parlay(request: Request):
             "matches_scanned": len(scan_games),
             "matches_with_odds_loaded": len(in_window),
             "matches_analysed": analysed,
-            "matches_matching_imported_competitions": (
-                int(feed.get("matching_fixture_count") or 0)
-                if provider_name == "OddsPapi" else len(matching_fixtures)
-            ),
+            "matches_matching_imported_competitions": len(matching_fixtures),
+            "provider_fixtures_in_window": total_in_window,
             "local_games_count": len(all_games),
             "local_team_stats_count": len(all_stats),
             "modelable_competitions": modelable_competition_labels,
@@ -1938,13 +1937,13 @@ async def recommend_parlay(request: Request):
             "fixture_competitions_scanned": sorted({
                 str(x.get("competition") or "").strip() for x in scan_games
             }),
-            "fixture_competitions_in_window": (
-                feed.get("available_competitions", [])[:40]
-                if provider_name == "OddsPapi" else sorted({
-                    str(x.get("competition") or "").strip() for x in in_window
-                    if str(x.get("competition") or "").strip()
-                })[:40]
-            ),
+            # Use only fixtures actually returned with odds in this window.
+            # feed.available_competitions is the global upcoming catalogue and
+            # must not trigger history imports for unrelated competitions.
+            "fixture_competitions_in_window": sorted({
+                str(x.get("competition") or "").strip() for x in in_window
+                if str(x.get("competition") or "").strip()
+            })[:40],
             "skipped": skipped,
             "history_skip_examples": history_skip_examples,
             "team_name_skip_examples": team_name_skip_examples,
@@ -1969,6 +1968,9 @@ async def recommend_parlay(request: Request):
             },
             "minimum_history_games": minimum_history,
             "risk_controls": {
+                "minimum_estimated_leg_probability": MIN_ESTIMATED_LEG_PROBABILITY,
+                "minimum_probability_scope": "each_parlay_leg_individually",
+                "minimum_joint_probability_scope": "whole_parlay_product_estimate",
                 "minimum_raw_model_probability": MIN_RAW_MODEL_PROBABILITY,
                 "minimum_market_probability": MIN_MARKET_PROBABILITY,
                 "maximum_model_market_gap_pp": MAX_MODEL_MARKET_GAP * 100.0,
