@@ -346,6 +346,27 @@ def _market_family(name: str) -> str | None:
     return aliases.get(label)
 
 
+def _participant_outcome_key(value: str) -> str:
+    normalized = unicodedata.normalize("NFKD", str(value or "").lower())
+    return "".join(char for char in normalized if char.isalnum())
+
+
+def _parse_market_outcome_label(
+    value: str, family: str, home: str = "", away: str = ""
+) -> tuple[str, float | None] | None:
+    parsed = _parse_label(value)
+    allowed = {"home", "away"} if family in {"moneyline", "spread"} else {"over", "under"}
+    if parsed is not None and parsed[0] in allowed:
+        return parsed
+    if family in {"moneyline", "spread"}:
+        label_key = _participant_outcome_key(value)
+        if label_key and label_key == _participant_outcome_key(home):
+            return "home", None
+        if label_key and label_key == _participant_outcome_key(away):
+            return "away", None
+    return None
+
+
 def _market_metadata() -> dict[str, dict]:
     """Load exact two-way full-game basketball market metadata from OddsPapi."""
     data = _get("markets", {"language": "en"}, ttl=86400)
@@ -390,10 +411,16 @@ def _market_metadata() -> dict[str, dict]:
         expected = {"home", "away"} if family in {"moneyline", "spread"} else {"over", "under"}
         canonical_sides = {
             parsed[0] for label in outcomes.values()
-            if (parsed := _parse_label(label)) is not None
+            if (parsed := _parse_market_outcome_label(label, family)) is not None
             and parsed[0] in expected
         }
-        if len(outcomes) != 2 or canonical_sides != expected:
+        # Totals must explicitly identify Over and Under. For moneylines and
+        # handicaps, some catalogue versions use participant names as outcome
+        # labels; those are resolved against this fixture later.
+        invalid_canonical_side = not canonical_sides.issubset(expected)
+        if len(outcomes) != 2 or invalid_canonical_side:
+            continue
+        if family == "total" and canonical_sides != expected:
             continue
         if family in {"total", "spread"} and handicap is None:
             continue
@@ -459,9 +486,14 @@ def market_catalogue_audit() -> dict:
         expected = {"home", "away"} if family in {"moneyline", "spread"} else {"over", "under"}
         canonical_sides = {
             parsed[0] for label in outcomes.values()
-            if (parsed := _parse_label(label)) is not None and parsed[0] in expected
+            if (parsed := _parse_market_outcome_label(label, family)) is not None
+            and parsed[0] in expected
         }
-        if len(outcomes) != 2 or canonical_sides != expected:
+        if (
+            len(outcomes) != 2
+            or not canonical_sides.issubset(expected)
+            or (family == "total" and canonical_sides != expected)
+        ):
             audit["excluded_invalid_outcomes"] += 1
             continue
 
@@ -647,7 +679,10 @@ def _normalise_odds_fixture(fixture: dict, odds: dict, market_families: dict[str
                     audit["source_changes_over_1h"] += 1
 
                 catalogue_label = (metadata.get("outcomes") or {}).get(str(outcome_id))
-                catalogue_parsed = _parse_label(catalogue_label) if catalogue_label else None
+                catalogue_parsed = (
+                    _parse_market_outcome_label(catalogue_label, family, home, away)
+                    if catalogue_label else None
+                )
                 bookmaker_parsed = _parse_label(player.get("bookmakerOutcomeId"))
 
                 # outcomeId -> outcomeName in /markets is the authoritative mapping.
