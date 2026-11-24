@@ -12,6 +12,7 @@ from oddspapi_provider import (
     _normalise_odds_fixture,
     _parse_label,
     _read_basketball_market_array,
+    _select_bookmakers,
 )
 
 
@@ -184,6 +185,34 @@ class OddsPapiBasketballNormalizationTests(unittest.TestCase):
         self.assertEqual(_competition_key("NCAA Women, Regular Season"), "ncaadivision1women")
         self.assertEqual(_competition_key("NBA G League Tip-Off Tournament"), "nbagleague")
 
+    def test_bookmaker_selection_deduplicates_same_brand_and_uses_up_to_five_operators(self):
+        selected = _select_bookmakers([
+            "bet365.bet.ar", "bet365", "betano", "pinnacle",
+            "betsson", "1xbet", "bwin",
+        ])
+        self.assertEqual(
+            selected,
+            ["bet365.bet.ar", "betano", "pinnacle", "betsson", "1xbet"],
+        )
+        self.assertEqual(len({_identity for _identity in (
+            "bet365" if name.startswith("bet365") else name
+            for name in selected
+        )}), 5)
+
+    def test_same_brand_aliases_cannot_satisfy_two_house_minimum(self):
+        from oddspapi_provider import OddsPapiError, games
+
+        now = datetime.now(timezone.utc)
+        account = {
+            "requests_remaining": 30,
+            "bookmakers_available_in_plan": ["bet365.bet.ar", "bet365"],
+        }
+        with patch("oddspapi_provider.account_status", return_value=account), \
+             patch("oddspapi_provider._get") as get:
+            with self.assertRaisesRegex(OddsPapiError, "dos casas independientes"):
+                games(now, now + timedelta(hours=4), ["NBA"])
+        get.assert_not_called()
+
     def test_odds_by_tournament_response_parser_accepts_list_and_wrapped_rows(self):
         from oddspapi_provider import _odds_by_tournament_rows
 
@@ -218,10 +247,13 @@ class OddsPapiBasketballNormalizationTests(unittest.TestCase):
             "22530": {"family": "total", "handicap": 220.5,
                       "outcomes": {"22530": "Over", "22531": "Under"}},
         }
+        subscribed = [
+            "bet365.bet.ar", "bet365", "betano", "pinnacle", "betsson", "1xbet",
+        ]
         account_rows = [
-            {"requests_remaining": 8, "bookmakers_available_in_plan": ["bet365", "betano", "pinnacle"]},
-            {"requests_remaining": 7, "bookmakers_available_in_plan": ["bet365", "betano", "pinnacle"]},
-            {"requests_remaining": 3, "bookmakers_available_in_plan": ["bet365", "betano", "pinnacle"]},
+            {"requests_remaining": 10, "bookmakers_available_in_plan": subscribed},
+            {"requests_remaining": 9, "bookmakers_available_in_plan": subscribed},
+            {"requests_remaining": 3, "bookmakers_available_in_plan": subscribed},
         ]
         calls = []
 
@@ -231,7 +263,10 @@ class OddsPapiBasketballNormalizationTests(unittest.TestCase):
                 return fixtures
             if path == "odds-by-tournaments":
                 bookmaker = params["bookmaker"]
-                offset = {"bet365": 0, "betano": 1, "pinnacle": 2}[bookmaker]
+                offset = {
+                    "bet365.bet.ar": 0, "betano": 1, "pinnacle": 2,
+                    "betsson": 3, "1xbet": 4,
+                }[bookmaker]
                 return [
                     {
                         "fixtureId": fixture["fixtureId"],
@@ -246,24 +281,25 @@ class OddsPapiBasketballNormalizationTests(unittest.TestCase):
              patch("oddspapi_provider._cache_is_fresh", return_value=False), \
              patch("oddspapi_provider._get", side_effect=fake_get), \
              patch("oddspapi_provider._market_metadata", return_value=catalogue), \
-             patch("oddspapi_provider.market_catalogue_audit", return_value={"families": {}}):
+             patch("oddspapi_provider.market_catalogue_audit", return_value={"families": {}}), \
+             patch("oddspapi_provider.time.sleep"):
             result = games(
                 now, now + timedelta(hours=6),
                 ["NBA", "NBA G League"],
             )
 
         self.assertEqual(result["odds_scan_method"], "odds-by-tournaments")
-        self.assertEqual(result["odds_requests_made"], 3)
+        self.assertEqual(result["odds_requests_made"], 5)
         self.assertEqual(result["odds_fixtures_requested"], 2)
         self.assertEqual(result["odds_fixtures_with_markets"], 2)
-        self.assertEqual(result["quota_remaining_before_scan"], 8)
+        self.assertEqual(result["quota_remaining_before_scan"], 10)
         self.assertEqual(result["quota_remaining_after_scan"], 3)
         self.assertEqual(len(result["games"]), 2)
         self.assertEqual(
-            [call[0] for call in calls].count("odds-by-tournaments"), 3
+            [call[0] for call in calls].count("odds-by-tournaments"), 5
         )
         for fixture in result["games"]:
-            self.assertEqual(len(fixture["periods"]["ft"]), 3)
+            self.assertEqual(len(fixture["periods"]["ft"]), 5)
 
     def test_bulk_odds_search_abstains_before_spending_when_quota_is_too_low(self):
         from oddspapi_provider import games
