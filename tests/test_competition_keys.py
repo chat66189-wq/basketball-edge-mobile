@@ -21,6 +21,17 @@ class CompetitionKeyTests(unittest.TestCase):
         self.assertNotEqual(key("NBA G League"), "nba")
 
     @unittest.skipIf(app_module is None, "fastapi is not installed")
+    def test_laketown_squadron_reuses_birmingham_franchise_history(self):
+        normalise = app_module._normalise_team_label
+        self.assertEqual(normalise("Laketown Squadron"), "laketownsquadron")
+        self.assertEqual(normalise("Birmingham Squadron"), "laketownsquadron")
+        self.assertEqual(
+            normalise("Birmingham Squadron"),
+            normalise("Laketown Squadron"),
+        )
+        self.assertNotEqual(normalise("Birmingham Squadron 2"), "laketownsquadron")
+
+    @unittest.skipIf(app_module is None, "fastapi is not installed")
     def test_history_normaliser_keeps_summer_league_out_of_nba(self):
         norm = app_module._normalise_competition
         self.assertEqual(norm("NBA"), "nba")
