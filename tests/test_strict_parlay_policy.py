@@ -62,7 +62,7 @@ class StrictParlayPolicyTests(unittest.TestCase):
         self.assertIn("if(label.startsWith('nbagleague'))return 'nbagleague'", HTML)
 
     def test_service_worker_refreshes_navigation_and_invalidates_prior_cache(self):
-        self.assertIn("basketball-edge-v36-espn-resilient-parlay-search", SERVICE_WORKER)
+        self.assertIn("basketball-edge-v37-batched-history-leg-probability", SERVICE_WORKER)
         self.assertIn("event.request.mode==='navigate'", SERVICE_WORKER)
 
 

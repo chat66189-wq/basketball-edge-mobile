@@ -7,6 +7,7 @@ It never derives missing box-score fields from averages or guessed values.
 from __future__ import annotations
 
 import calendar
+import gc
 import json
 import re
 import threading
@@ -22,7 +23,8 @@ _CACHE: dict[str, tuple[float, dict]] = {}
 _LOCK = threading.Lock()
 MAX_MONTHS = 14
 MAX_EVENTS_PER_LEAGUE = 240
-MAX_WORKERS = 6
+MAX_SCOREBOARD_WORKERS = 2
+MAX_WORKERS = 2
 MAX_RESPONSE_BYTES = 32 * 1024 * 1024
 
 # Only mappings that can be kept separate from the imported competition scope.
@@ -379,55 +381,79 @@ def sync(competitions: str, days: int = 400, max_games_per_league: int = 180) ->
             if spec.get("groups"):
                 params["groups"] = spec["groups"]
             return _get_json(spec["slug"] + "/scoreboard", params, ttl=6 * 3600)
-        with ThreadPoolExecutor(max_workers=4) as executor:
-            month_futures = {executor.submit(fetch_month, month): month for month in months}
-            for future in as_completed(month_futures):
-                try:
-                    scoreboard = future.result()
-                except ESPNError as exc:
-                    if exc.status == 404:
+        # Process small batches. Keeping all completed Future objects in one
+        # large dictionary also keeps every decoded ESPN JSON response alive.
+        # Batching bounds peak memory on Render's 512 MiB free instance.
+        for month_offset in range(0, len(months), MAX_SCOREBOARD_WORKERS):
+            month_batch = months[month_offset:month_offset + MAX_SCOREBOARD_WORKERS]
+            with ThreadPoolExecutor(max_workers=MAX_SCOREBOARD_WORKERS) as executor:
+                month_futures = {
+                    executor.submit(fetch_month, month): month for month in month_batch
+                }
+                for future in as_completed(month_futures):
+                    try:
+                        scoreboard = future.result()
+                    except ESPNError as exc:
+                        if exc.status == 404:
+                            continue
+                        if exc.status == 429:
+                            raise
+                        failed_scoreboards += 1
                         continue
-                    if exc.status == 429:
-                        raise
-                    failed_scoreboards += 1
-                    continue
-                except Exception:
-                    failed_scoreboards += 1
-                    continue
-                events = scoreboard.get("events") or []
-                if not isinstance(events, list):
-                    continue
-                for raw_event in events:
-                    event = _event_from_scoreboard(raw_event, spec)
-                    if event is None:
+                    except Exception:
+                        failed_scoreboards += 1
                         continue
-                    played = _parse_datetime(event["event_time"])
-                    if played and start_day <= played.date() <= end_day:
-                        event_index[event["espn_id"]] = event
+                    events = scoreboard.get("events") or []
+                    if not isinstance(events, list):
+                        continue
+                    for raw_event in events:
+                        event = _event_from_scoreboard(raw_event, spec)
+                        if event is None:
+                            continue
+                        played = _parse_datetime(event["event_time"])
+                        if played and start_day <= played.date() <= end_day:
+                            event_index[event["espn_id"]] = event
+            month_futures.clear()
+            scoreboard = None
+            events = None
+            future = None
+            gc.collect()
+
         ordered = sorted(event_index.values(), key=lambda item: item["event_time"], reverse=True)
         total_events_seen += len(ordered)
         chosen = ordered[:max_games_per_league]
         if not chosen:
             continue
-        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-            futures = {executor.submit(_summary_rows, event): event for event in chosen}
-            for future in as_completed(futures):
-                event = futures[future]
-                try:
-                    rows = future.result()
-                except ESPNError as exc:
-                    failed_summaries += 1
-                    if exc.status == 429:
-                        raise
-                    continue
-                except Exception:
-                    failed_summaries += 1
-                    continue
-                if len(rows) != 2:
-                    incomplete_boxscores += 1
-                    continue
-                all_games.append({k: v for k, v in event.items() if not k.startswith("_")})
-                all_stats.extend(rows)
+        # Summary responses can be considerably larger than scoreboard rows.
+        # Keep at most MAX_WORKERS decoded summaries resident at once.
+        for event_offset in range(0, len(chosen), MAX_WORKERS):
+            event_batch = chosen[event_offset:event_offset + MAX_WORKERS]
+            with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+                futures = {
+                    executor.submit(_summary_rows, event): event for event in event_batch
+                }
+                for future in as_completed(futures):
+                    event = futures[future]
+                    try:
+                        rows = future.result()
+                    except ESPNError as exc:
+                        failed_summaries += 1
+                        if exc.status == 429:
+                            raise
+                        continue
+                    except Exception:
+                        failed_summaries += 1
+                        continue
+                    if len(rows) != 2:
+                        incomplete_boxscores += 1
+                        continue
+                    all_games.append({k: v for k, v in event.items() if not k.startswith("_")})
+                    all_stats.extend(rows)
+            futures.clear()
+            rows = None
+            event = None
+            future = None
+            gc.collect()
 
     all_games.sort(key=lambda item: item["event_time"])
     all_stats.sort(key=lambda item: (item["event_id"], item["team"]))
