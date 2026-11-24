@@ -82,7 +82,7 @@ class ESPNProviderTests(unittest.TestCase):
     def test_sync_keeps_good_months_when_one_scoreboard_returns_invalid_json(self):
         now = datetime.now(timezone.utc)
         played = now - timedelta(days=10)
-        bad_month = (now - timedelta(days=35)).strftime("%Y%m")
+        bad_month = "190001"
         good_month = played.strftime("%Y%m")
         event = _event(played)
 
