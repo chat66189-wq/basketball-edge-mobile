@@ -222,6 +222,9 @@ class OddsPapiBasketballNormalizationTests(unittest.TestCase):
     def test_unknown_outcome_id_is_not_guessed_from_array_position(self):
         bookmaker = self._bookmaker(0)
         del bookmaker["markets"]["111"]["outcomes"]["112"]
+        bookmaker["markets"]["111"]["outcomes"]["opaque-unknown"] = {
+            "players": {"0": self._price(2.0, "not-a-side")}
+        }
         normalized = _normalise_odds_fixture(
             self.fixture,
             {"bookmakerOdds": {"book-one": bookmaker}},
@@ -229,7 +232,8 @@ class OddsPapiBasketballNormalizationTests(unittest.TestCase):
             self.now,
         )
         self.assertNotIn("moneyline", normalized["periods"]["ft"].get("book-one", {}))
-        self.assertGreaterEqual(normalized["odds_audit"]["unparsed_outcomes"], 0)
+        self.assertEqual(normalized["odds_audit"]["unparsed_outcomes"], 1)
+        self.assertEqual(normalized["odds_audit"]["missing_catalogue_outcome_ids"], 1)
         self.assertEqual(normalized["odds_audit"]["outcomes_mapped_by_position"], 0)
 
     def test_bookmaker_line_conflict_does_not_pair_different_totals(self):
