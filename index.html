@@ -671,7 +671,7 @@ async function persistEspnHistoryWithoutDuplicates(data){
  const records=await allRecords();
  const existingGames=records.filter(r=>r.kind==='dataset'&&r.type==='games');
  const existingStats=records.filter(r=>r.kind==='dataset'&&r.type==='team_stats');
- const normTeam=value=>String(value||'').normalize('NFKD').replace(/[\\u0300-\\u036f]/g,'').toLowerCase().replace(/[^a-z0-9]+/g,'');
+ const normTeam=value=>String(value||'').normalize('NFKD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/[^a-z0-9]+/g,'');
  const gameSignature=g=>{
   const comp=autoCompetitionKey(g.competition);
   const home=normTeam(g.home_team),away=normTeam(g.away_team);
@@ -744,7 +744,7 @@ async function autoTopUpHistoryForFixtures(analysis){
  const now=Date.now();
  const audit=analysis.competition_history_audit||{};
  const minimum=Number(analysis.minimum_history_games||12);
- const normTeam=value=>String(value||'').normalize('NFKD').replace(/[\\u0300-\\u036f]/g,'').toLowerCase().replace(/[^a-z0-9]+/g,'');
+ const normTeam=value=>String(value||'').normalize('NFKD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/[^a-z0-9]+/g,'');
  const candidates=refreshLabels.map(label=>{
   const key=autoCompetitionKey(label);
   if(!supportedKeys.has(key))return null;
