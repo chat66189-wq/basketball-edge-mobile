@@ -267,6 +267,28 @@ def _get(path: str, params: dict | None = None, ttl: int = 0, unmetered: bool = 
     return data
 
 
+def _get_with_rate_limit_retry(
+    path: str,
+    params: dict | None = None,
+    ttl: int = 0,
+    unmetered: bool = False,
+    max_attempts: int = 4,
+):
+    """Retry only transient HTTP 429 throttling; never retry exhausted monthly quota."""
+    for attempt in range(max_attempts):
+        try:
+            return _get(path, params, ttl=ttl, unmetered=unmetered)
+        except OddsPapiError as exc:
+            temporary = (
+                exc.status == 429
+                and "límite temporal de solicitudes" in str(exc).lower()
+            )
+            if not temporary or attempt + 1 >= max_attempts:
+                raise
+            # Back off between attempts to let the provider's short window reset.
+            time.sleep(min(2 ** (attempt + 1), 8))
+
+
 def account_status(force_refresh: bool = False) -> dict:
     if not os.environ.get("ODDSPAPI_API_KEY", "").strip():
         return {"configured": False, "provider": "OddsPapi", "connected": False,
@@ -1148,7 +1170,7 @@ def games(
     odds_requests_made = 0
     for bookmaker in selected_bookmakers:
         for tournament_group in tournament_groups:
-            response = _get(
+            response = _get_with_rate_limit_retry(
                 "odds-by-tournaments",
                 {
                     "tournamentIds": ",".join(tournament_group),
