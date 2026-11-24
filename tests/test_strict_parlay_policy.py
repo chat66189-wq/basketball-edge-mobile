@@ -20,6 +20,11 @@ class StrictParlayPolicyTests(unittest.TestCase):
         self.assertIn("MIN_RAW_MODEL_PROBABILITY = 0.72", APP)
         self.assertIn('"conservative_probability_below_70pct"', APP)
 
+    def test_automatic_search_uses_alternative_aware_grouped_optimizer(self):
+        self.assertIn("strict_best_parlay, parlay_search_diagnostics = _best_automatic_parlay(", APP)
+        self.assertIn('"parlay_search": parlay_search_diagnostics', APP)
+        self.assertIn("grouped_log_odds_dynamic_programming", APP)
+
     def test_two_bookmaker_paired_consensus_is_required(self):
         self.assertIn("MIN_AUTOMATIC_BOOKMAKER_CONSENSUS = 2", APP)
         self.assertIn('reject("fewer_than_2_bookmakers")', APP)
