@@ -22,7 +22,7 @@ class StrictParlayPolicyTests(unittest.TestCase):
         self.assertIn('"conservative_probability_below_70pct"', APP)
 
     def test_automatic_search_uses_alternative_aware_grouped_optimizer(self):
-        self.assertIn("strict_best_parlay, parlay_search_diagnostics = _best_automatic_parlay(", APP)
+        self.assertIn("strict_best_parlay, parlay_search_diagnostics = best_automatic_parlay(", APP)
         self.assertIn('"parlay_search": parlay_search_diagnostics', APP)
         self.assertIn("grouped_log_odds_dynamic_programming", OPTIMIZER)
 
