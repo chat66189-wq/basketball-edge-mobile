@@ -15,6 +15,7 @@ import threading
 import time
 import unicodedata
 from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -43,9 +44,15 @@ _LOCK = threading.Lock()
 
 
 class OddsPapiError(Exception):
-    def __init__(self, message: str, status: int = 502):
+    def __init__(
+        self,
+        message: str,
+        status: int = 502,
+        retry_after_seconds: float | None = None,
+    ):
         super().__init__(message)
         self.status = status
+        self.retry_after_seconds = retry_after_seconds
 
 
 def _read_basketball_market_array(response, max_bytes: int = 128 * 1024 * 1024) -> list[dict]:
@@ -187,7 +194,7 @@ def _read_basketball_market_array(response, max_bytes: int = 128 * 1024 * 1024) 
     return selected
 
 
-def _get(path: str, params: dict | None = None, ttl: int = 0, unmetered: bool = False):
+def _get_once(path: str, params: dict | None = None, ttl: int = 0, unmetered: bool = False):
     api_key = os.environ.get("ODDSPAPI_API_KEY", "").strip()
     if not api_key:
         raise OddsPapiError("Falta ODDSPAPI_API_KEY en las variables de entorno de Render.", 503)
@@ -252,7 +259,27 @@ def _get(path: str, params: dict | None = None, ttl: int = 0, unmetered: bool = 
         if exc.code == 429 and code == "REQUEST_LIMIT_EXCEEDED":
             raise OddsPapiError("Se agotó la cuota mensual de OddsPapi. Consultá el consumo en /api/oddspapi/status.", 429) from exc
         if exc.code == 429:
-            raise OddsPapiError("OddsPapi aplicó un límite temporal de solicitudes. Esperá y volvé a intentar.", 429) from exc
+            retry_after_seconds = None
+            retry_after = exc.headers.get("Retry-After") if exc.headers else None
+            if retry_after:
+                try:
+                    retry_after_seconds = max(0.0, float(retry_after))
+                except (TypeError, ValueError):
+                    try:
+                        retry_at = parsedate_to_datetime(retry_after)
+                        if retry_at.tzinfo is None:
+                            retry_at = retry_at.replace(tzinfo=timezone.utc)
+                        retry_after_seconds = max(
+                            0.0,
+                            (retry_at.astimezone(timezone.utc) - datetime.now(timezone.utc)).total_seconds(),
+                        )
+                    except (TypeError, ValueError, OverflowError):
+                        retry_after_seconds = None
+            raise OddsPapiError(
+                "OddsPapi aplicó un límite temporal de solicitudes. Esperá y volvé a intentar.",
+                429,
+                retry_after_seconds=retry_after_seconds,
+            ) from exc
         if exc.code == 404:
             raise OddsPapiError("OddsPapi no encontró datos para la consulta solicitada.", 404) from exc
         safe_message = f" {provider_message}" if provider_message else ""
@@ -272,12 +299,12 @@ def _get_with_rate_limit_retry(
     params: dict | None = None,
     ttl: int = 0,
     unmetered: bool = False,
-    max_attempts: int = 4,
+    max_attempts: int = 5,
 ):
-    """Retry only transient HTTP 429 throttling; never retry exhausted monthly quota."""
+    """Retry transient HTTP 429s for all OddsPapi endpoints; never retry monthly quota exhaustion."""
     for attempt in range(max_attempts):
         try:
-            return _get(path, params, ttl=ttl, unmetered=unmetered)
+            return _get_once(path, params, ttl=ttl, unmetered=unmetered)
         except OddsPapiError as exc:
             temporary = (
                 exc.status == 429
@@ -285,8 +312,15 @@ def _get_with_rate_limit_retry(
             )
             if not temporary or attempt + 1 >= max_attempts:
                 raise
-            # Back off between attempts to let the provider's short window reset.
-            time.sleep(min(2 ** (attempt + 1), 8))
+            retry_after = getattr(exc, "retry_after_seconds", None)
+            fallback_delay = min(2 ** (attempt + 1), 16)
+            delay = fallback_delay if retry_after is None else float(retry_after)
+            time.sleep(min(max(delay, 1.0), 60.0))
+
+
+def _get(path: str, params: dict | None = None, ttl: int = 0, unmetered: bool = False):
+    """Shared request entry point: account, fixtures, markets and odds all retry temporary 429s."""
+    return _get_with_rate_limit_retry(path, params, ttl=ttl, unmetered=unmetered)
 
 
 def account_status(force_refresh: bool = False) -> dict:
