@@ -25,7 +25,7 @@ class OddsPapiBasketballNormalizationTests(unittest.TestCase):
             OddsPapiError("OddsPapi aplicó un límite temporal de solicitudes.", 429),
             {"ok": True},
         ]
-        with patch("oddspapi_provider._get", side_effect=attempts) as request, \
+        with patch("oddspapi_provider._get_once", side_effect=attempts) as request, \
              patch("oddspapi_provider.time.sleep") as sleep:
             result = _get_with_rate_limit_retry("odds-by-tournaments", {"bookmaker": "test"})
         self.assertEqual(result, {"ok": True})
@@ -34,10 +34,50 @@ class OddsPapiBasketballNormalizationTests(unittest.TestCase):
 
     def test_monthly_quota_exhaustion_is_not_retried(self):
         error = OddsPapiError("Se agotó la cuota mensual de OddsPapi.", 429)
-        with patch("oddspapi_provider._get", side_effect=error) as request, \
+        with patch("oddspapi_provider._get_once", side_effect=error) as request, \
              patch("oddspapi_provider.time.sleep") as sleep:
             with self.assertRaises(OddsPapiError):
                 _get_with_rate_limit_retry("odds-by-tournaments", {"bookmaker": "test"})
+        self.assertEqual(request.call_count, 1)
+        sleep.assert_not_called()
+
+    def test_shared_get_retries_temporary_429_for_non_odds_endpoints(self):
+        attempts = [
+            OddsPapiError("OddsPapi aplicó un límite temporal de solicitudes.", 429),
+            {"fixtures": []},
+        ]
+        with patch("oddspapi_provider._get_once", side_effect=attempts) as request, \
+             patch("oddspapi_provider.time.sleep") as sleep:
+            from oddspapi_provider import _get
+            result = _get("fixtures", {"sportId": 11})
+        self.assertEqual(result, {"fixtures": []})
+        self.assertEqual(request.call_count, 2)
+        sleep.assert_called_once_with(2.0)
+
+    def test_shared_get_honours_retry_after_header_value(self):
+        attempts = [
+            OddsPapiError(
+                "OddsPapi aplicó un límite temporal de solicitudes.",
+                429,
+                retry_after_seconds=12,
+            ),
+            {"ok": True},
+        ]
+        with patch("oddspapi_provider._get_once", side_effect=attempts) as request, \
+             patch("oddspapi_provider.time.sleep") as sleep:
+            from oddspapi_provider import _get
+            result = _get("markets", {"language": "en"})
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(request.call_count, 2)
+        sleep.assert_called_once_with(12.0)
+
+    def test_shared_get_does_not_retry_monthly_quota_on_any_endpoint(self):
+        error = OddsPapiError("Se agotó la cuota mensual de OddsPapi.", 429)
+        with patch("oddspapi_provider._get_once", side_effect=error) as request, \
+             patch("oddspapi_provider.time.sleep") as sleep:
+            from oddspapi_provider import _get
+            with self.assertRaises(OddsPapiError):
+                _get("fixtures", {"sportId": 11})
         self.assertEqual(request.call_count, 1)
         sleep.assert_not_called()
 
