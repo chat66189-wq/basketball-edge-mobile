@@ -938,10 +938,6 @@ async function autoTopUpHistoryForFixtures(analysis){
  });
  const deferred=candidates.slice(2);
  const selected=candidates.slice(0,2);
- if(!selected.length){
-  const deficitText=deficits.length?' Los equipos con muestra corta ya fueron actualizados recientemente o ESPN no puede completar más datos.':'';
-  return {teamStatsRows:0,summary:'No se consultó SportAPI.ai. '+(unsupported.length?'ESPN no tiene cobertura pública mapeada para: '+unsupported.join(', ')+'. ':'')+'No hay una actualización ESPN pendiente para las competiciones de esta ventana.'+deficitText};
- }
  const existingJob=readSavedEspnSyncJob();
  if(existingJob){
   const resumed=await runSavedHistorySyncJob();
@@ -949,6 +945,10 @@ async function autoTopUpHistoryForFixtures(analysis){
   if(deferred.length)summary+=' Otras competiciones compatibles pendientes para búsquedas posteriores: '+deferred.map(item=>item.label).join(', ')+'.';
   if(unsupported.length)summary+=' Sin cobertura ESPN: '+unsupported.join(', ')+'.';
   return {...resumed,summary};
+ }
+ if(!selected.length){
+  const deficitText=deficits.length?' Los equipos con muestra corta ya fueron actualizados recientemente o ESPN no puede completar más datos.':'';
+  return {teamStatsRows:0,summary:'No se consultó SportAPI.ai. '+(unsupported.length?'ESPN no tiene cobertura pública mapeada para: '+unsupported.join(', ')+'. ':'')+'No hay una actualización ESPN pendiente para las competiciones de esta ventana.'+deficitText};
  }
  const days=400,chunkDays=ESPN_SYNC_CHUNK_DAYS;
  const chunksPerCompetition=Math.ceil(days/chunkDays);
