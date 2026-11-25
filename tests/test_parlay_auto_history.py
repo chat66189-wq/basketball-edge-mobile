@@ -28,6 +28,21 @@ class ParlayAutomaticHistoryTests(unittest.TestCase):
         self.assertIn("existingStatKeys", HTML)
         self.assertIn("bea-v20-espn-history:", HTML)
 
+    def test_automatic_history_sync_is_chunked_and_resumable(self):
+        self.assertIn("bea-v20-espn-history-sync-job-v1", HTML)
+        self.assertIn("CHUNK_DAYS=28", HTML)
+        self.assertIn("max_games_per_league:String(job.maxGamesPerChunk)", HTML)
+        self.assertIn("await persistEspnHistoryWithoutDuplicates(data)", HTML)
+        self.assertIn("start_date:range.start", HTML)
+        self.assertIn("end_date:range.end", HTML)
+        self.assertIn("Reanudar sincronización", HTML)
+        self.assertIn("completedChunks", HTML)
+
+    def test_automatic_history_resume_uses_saved_chunk_progress(self):
+        self.assertIn("runSavedHistorySyncJob", HTML)
+        self.assertIn("localStorage.setItem(ESPN_SYNC_JOB_KEY", HTML)
+        self.assertIn("localStorage.getItem(ESPN_SYNC_JOB_KEY)", HTML)
+
     def test_automatic_search_retries_after_new_team_boxscores(self):
         self.assertIn("if(updated.teamStatsRows>0)", HTML)
         self.assertIn("data=await requestRecommendation(games,teamStats)", HTML)
