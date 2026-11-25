@@ -334,7 +334,13 @@ def _summary_rows(event: dict) -> list[dict]:
     return rows if seen_sides == {"home", "away"} else []
 
 
-def sync(competitions: str, days: int = 400, max_games_per_league: int = 180) -> dict:
+def sync(
+    competitions: str,
+    days: int = 400,
+    max_games_per_league: int = 180,
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> dict:
     try:
         days = int(days)
         max_games_per_league = int(max_games_per_league)
@@ -362,8 +368,23 @@ def sync(competitions: str, days: int = 400, max_games_per_league: int = 180) ->
             "warnings": ["ESPN no ofrece un mapeo verificado para las competiciones de esta ventana."],
         }
 
-    end_day = datetime.now(timezone.utc).date()
-    start_day = end_day - timedelta(days=days - 1)
+    if (start_date is None) != (end_date is None):
+        raise ESPNError("start_date y end_date deben enviarse juntos.", 422)
+    if start_date is not None and end_date is not None:
+        try:
+            start_day = date.fromisoformat(str(start_date))
+            end_day = date.fromisoformat(str(end_date))
+        except ValueError:
+            raise ESPNError("start_date y end_date deben usar YYYY-MM-DD.", 422) from None
+        if end_day < start_day:
+            raise ESPNError("end_date no puede ser anterior a start_date.", 422)
+        if (end_day - start_day).days + 1 > 31:
+            raise ESPNError("Cada lote ESPN puede cubrir como máximo 31 días.", 422)
+        if end_day > datetime.now(timezone.utc).date():
+            raise ESPNError("end_date no puede estar en el futuro.", 422)
+    else:
+        end_day = datetime.now(timezone.utc).date()
+        start_day = end_day - timedelta(days=days - 1)
     months = _month_keys(start_day, end_day)
     if len(months) > MAX_MONTHS:
         months = months[-MAX_MONTHS:]
@@ -479,6 +500,8 @@ def sync(competitions: str, days: int = 400, max_games_per_league: int = 180) ->
         "competitions_requested": labels,
         "competitions_supported": [spec["competition"] for _, spec in selected],
         "days_requested": days,
+        "start_date": start_day.isoformat(),
+        "end_date": end_day.isoformat(),
         "max_games_per_league": max_games_per_league,
         "scoreboard_events_seen": total_events_seen,
         "games_received": len(all_games),

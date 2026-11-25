@@ -147,6 +147,13 @@
         <p class="small"><strong>Política fija:</strong> cada pick debe superar el 70% de probabilidad conservadora. El modo de mejor esfuerzo está desactivado y no puede bajar ese mínimo.</p>
         <div class="actions"><button class="action" type="button" id="preview-local">Analizar candidatos localmente (sin cuotas)</button><button class="action secondary" type="button" id="check-hoopsapi">Comprobar proveedor de cuotas</button><button class="action" type="button" id="build-parlay">Buscar combinada · completar historial automáticamente</button><button class="action" type="button" id="build-bookmaker-parlay">Buscar picks y combinada con cuotas guardadas de esta casa</button><button class="action secondary" type="button" id="run-backtest">Medir acierto real del modelo (backtest)</button></div><div id="backtest-result" class="small"></div>
         <div id="parlay-message" class="fileline" aria-live="polite"></div>
+        <div id="espn-sync-progress" class="fileline" aria-live="polite" style="display:none">
+          <strong>Sincronización de historial</strong>
+          <p id="espn-sync-progress-label">Preparando lotes de ESPN…</p>
+          <progress id="espn-sync-progress-bar" max="1" value="0" style="width:100%"></progress>
+          <div class="actions"><button class="action" type="button" id="espn-sync-resume-button">Reanudar sincronización</button></div>
+          <p class="small">Cada lote terminado queda guardado en este iPhone. Si cerrás la aplicación, podés volver y reanudar desde el último lote confirmado.</p>
+        </div>
         <div id="parlay-result"></div>
       </div>
       <div class="panel"><h2>Simular un partido</h2><p class="small">Necesitás importar partidos finalizados y estadísticas de ambos equipos en la pestaña Datos CSV. El análisis utiliza el mismo ámbito exacto de competición y temporada.</p>
@@ -719,8 +726,171 @@ async function persistEspnHistoryWithoutDuplicates(data){
  await refresh();
  return {gamesAdded,duplicateGames,statsAdded};
 }
+const ESPN_SYNC_JOB_KEY='bea-v20-espn-history-sync-job-v1';
+const ESPN_SYNC_CHUNK_DAYS=28;
+const ESPN_SYNC_MAX_GAMES=45;
+let espnSyncBusy=false;
+
+function readSavedEspnSyncJob(){
+ try{
+  const raw=localStorage.getItem(ESPN_SYNC_JOB_KEY);
+  if(!raw)return null;
+  const job=JSON.parse(raw);
+  if(!job||job.version!==1||!Array.isArray(job.competitions)||!job.competitions.length)return null;
+  return job;
+ }catch(_){return null;}
+}
+function renderEspnSyncProgress(job=readSavedEspnSyncJob()){
+ const box=document.getElementById('espn-sync-progress');
+ const label=document.getElementById('espn-sync-progress-label');
+ const bar=document.getElementById('espn-sync-progress-bar');
+ const button=document.getElementById('espn-sync-resume-button');
+ if(!box||!label||!bar||!button)return;
+ if(!job){box.style.display='none';return;}
+ const current=job.competitions[Math.min(job.competitionIndex||0,job.competitions.length-1)];
+ const total=Math.max(1,Number(job.totalChunks||1));
+ const done=Math.min(total,Number(job.completedChunks||0));
+ const percent=Math.round(done/total*100);
+ const currentText=current?current.label:'finalizando';
+ label.textContent=(job.lastError?'Sincronización interrumpida. ':'Historial ESPN · ')+
+  currentText+' · '+done+'/'+total+' lotes ('+percent+'%). '+
+  Number(job.gamesAdded||0)+' partidos nuevos y '+Number(job.teamStatsRowsAdded||0)+' registros guardados.';
+ bar.max=total;bar.value=done;
+ button.disabled=espnSyncBusy;
+ button.textContent=espnSyncBusy?'Sincronizando…':'Reanudar sincronización';
+ box.style.display='block';
+}
+function normaliseEspnTeam(value){
+ return String(value||'').normalize('NFKD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/[^a-z0-9]+/g,'');
+}
+function espnChunkRange(job,chunkIndex){
+ const dayMs=86400000;
+ const windowEnd=Date.parse(job.windowEnd+'T00:00:00Z');
+ const windowStart=windowEnd-(Number(job.days)-1)*dayMs;
+ const chunkEnd=windowEnd-Number(chunkIndex)*Number(job.chunkDays)*dayMs;
+ const chunkStart=Math.max(windowStart,chunkEnd-(Number(job.chunkDays)-1)*dayMs);
+ return {
+  start:new Date(chunkStart).toISOString().slice(0,10),
+  end:new Date(chunkEnd).toISOString().slice(0,10)
+ };
+}
+async function espnTargetTeamsHaveEnoughHistory(competitionKey,targetTeams,minimum){
+ if(!Array.isArray(targetTeams)||!targetTeams.length)return false;
+ const records=await allRecords();
+ const games=records.filter(r=>r.kind==='dataset'&&r.type==='games').map(r=>r.data||{});
+ const stats=records.filter(r=>r.kind==='dataset'&&r.type==='team_stats').map(r=>r.data||{});
+ const competitionByEvent=new Map();
+ for(const game of games){
+  const eventId=String(game.event_id||'');
+  if(eventId&&autoCompetitionKey(game.competition)===competitionKey)competitionByEvent.set(eventId,game.competition);
+ }
+ const eventsByTeam=new Map();
+ for(const row of stats){
+  const eventId=String(row.event_id||'');
+  if(!eventId||!competitionByEvent.has(eventId))continue;
+  const team=normaliseEspnTeam(row.team);
+  if(!team)continue;
+  if(!eventsByTeam.has(team))eventsByTeam.set(team,new Set());
+  eventsByTeam.get(team).add(eventId);
+ }
+ return targetTeams.every(team=>(eventsByTeam.get(normaliseEspnTeam(team))?.size||0)>=minimum);
+}
+async function runSavedHistorySyncJob(){
+ const job=readSavedEspnSyncJob();
+ if(!job)return {teamStatsRows:0,gamesAdded:0,summary:'No hay una sincronización pendiente.'};
+ if(espnSyncBusy)return {teamStatsRows:0,gamesAdded:0,summary:'La sincronización ya está en curso.'};
+ espnSyncBusy=true;
+ let lastLabel='';
+ renderEspnSyncProgress(job);
+ try{
+  while(job.competitionIndex<job.competitions.length){
+   const competition=job.competitions[job.competitionIndex];
+   const chunksForCompetition=Math.ceil(Number(job.days)/Number(job.chunkDays));
+   if(job.chunkIndex>=chunksForCompetition){
+    for(const key of competition.cooldownKeys||[])localStorage.setItem(key,String(Date.now()));
+    job.competitionIndex+=1;
+    job.chunkIndex=0;
+    job.pendingRange=null;
+    localStorage.setItem(ESPN_SYNC_JOB_KEY,JSON.stringify(job));
+    renderEspnSyncProgress(job);
+    continue;
+   }
+   const range=espnChunkRange(job,job.chunkIndex);
+   job.pendingRange={competition:competition.label,...range,index:job.chunkIndex+1};
+   job.lastError='';
+   localStorage.setItem(ESPN_SYNC_JOB_KEY,JSON.stringify(job));
+   lastLabel=competition.label;
+   renderEspnSyncProgress(job);
+   const query=new URLSearchParams({
+    competitions:competition.label,
+    start_date:range.start,
+    end_date:range.end,
+    max_games_per_league:String(job.maxGamesPerChunk)
+   });
+   const data=await providerRequest('/api/espn/history-sync?'+query);
+   const merged=await persistEspnHistoryWithoutDuplicates(data);
+   job.gamesAdded=Number(job.gamesAdded||0)+merged.gamesAdded;
+   job.duplicateGames=Number(job.duplicateGames||0)+merged.duplicateGames;
+   job.teamStatsRowsAdded=Number(job.teamStatsRowsAdded||0)+merged.statsAdded;
+   job.warnings=[...new Set([...(job.warnings||[]),...(data.warnings||[])])];
+   job.completedChunks=Number(job.completedChunks||0)+1;
+   job.chunkIndex+=1;
+   job.pendingRange=null;
+   localStorage.setItem(ESPN_SYNC_JOB_KEY,JSON.stringify(job));
+   renderEspnSyncProgress(job);
+   const minimum=Number(job.minimumHistoryGames||12);
+   if(competition.targetTeams?.length&&await espnTargetTeamsHaveEnoughHistory(
+      competition.key,competition.targetTeams,minimum
+   )){
+    const skipped=Math.max(0,chunksForCompetition-job.chunkIndex);
+    job.completedChunks=Math.min(job.totalChunks,job.completedChunks+skipped);
+    job.chunkIndex=chunksForCompetition;
+    job.earlyStoppedCompetitions=[...(job.earlyStoppedCompetitions||[]),competition.label];
+    localStorage.setItem(ESPN_SYNC_JOB_KEY,JSON.stringify(job));
+    renderEspnSyncProgress(job);
+   }
+  }
+  const completed={
+   gamesAdded:Number(job.gamesAdded||0),
+   duplicateGames:Number(job.duplicateGames||0),
+   teamStatsRows:Number(job.teamStatsRowsAdded||0),
+   completedChunks:Number(job.completedChunks||0),
+   warnings:job.warnings||[],
+   earlyStoppedCompetitions:job.earlyStoppedCompetitions||[]
+  };
+  localStorage.removeItem(ESPN_SYNC_JOB_KEY);
+  renderEspnSyncProgress(null);
+  let summary='ESPN terminó la sincronización por lotes: '+completed.gamesAdded+
+   ' partidos nuevos · '+completed.duplicateGames+' duplicados reconciliados · '+
+   completed.teamStatsRows+' registros de equipo nuevos · '+completed.completedChunks+' lotes completados.';
+  if(completed.earlyStoppedCompetitions.length)summary+=' Se dejaron de consultar períodos anteriores cuando los equipos objetivo alcanzaron '+Number(job.minimumHistoryGames||12)+' partidos: '+completed.earlyStoppedCompetitions.join(', ')+'.';
+  if(completed.warnings.length)summary+=' '+completed.warnings.join(' ');
+  return {...completed,summary};
+ }catch(error){
+  job.lastError=String(error?.message||error||'Error desconocido');
+  localStorage.setItem(ESPN_SYNC_JOB_KEY,JSON.stringify(job));
+  renderEspnSyncProgress(job);
+  throw error;
+ }finally{
+  espnSyncBusy=false;
+  renderEspnSyncProgress(readSavedEspnSyncJob());
+ }
+}
+
+document.getElementById('espn-sync-resume-button').addEventListener('click',async()=>{
+ const button=document.getElementById('espn-sync-resume-button');
+ if(espnSyncBusy)return;
+ button.disabled=true;
+ try{
+  const result=await runSavedHistorySyncJob();
+  const message=document.getElementById('parlay-message');
+  message.textContent=result.summary+' Volvé a ejecutar la búsqueda automática para actualizar los picks con el historial nuevo.';
+ }catch(error){
+  document.getElementById('parlay-message').textContent='La sincronización se detuvo, pero el último lote terminado está guardado. Podés reanudarla: '+error.message;
+ }
+});
+
 async function autoTopUpHistoryForFixtures(analysis){
- const message=document.getElementById('parlay-message');
  const labels=Array.isArray(analysis.fixture_competitions_in_window)?analysis.fixture_competitions_in_window:[];
  const modelableKeys=new Set((analysis.modelable_competitions||[]).map(autoCompetitionKey));
  const supportedKeys=new Set(['nba','nbagleague','nbl','wnba','ncaadivision1men','ncaadivision1women']);
@@ -731,8 +901,6 @@ async function autoTopUpHistoryForFixtures(analysis){
   const key=autoCompetitionKey(label);
   return key&&!modelableKeys.has(key);
  }))];
- // A league can be modelable overall while a team in a specific fixture has
- // fewer than 12 games. Refresh those real fixture leagues too.
  const teamDeficitLabels=labels.filter(label=>deficitKeys.has(autoCompetitionKey(label)));
  const fallbackDeficitLabels=hasShortHistory&&!deficits.length
   ?labels.filter(label=>supportedKeys.has(autoCompetitionKey(label))):[];
@@ -744,17 +912,17 @@ async function autoTopUpHistoryForFixtures(analysis){
  const now=Date.now();
  const audit=analysis.competition_history_audit||{};
  const minimum=Number(analysis.minimum_history_games||12);
- const normTeam=value=>String(value||'').normalize('NFKD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/[^a-z0-9]+/g,'');
  const candidates=refreshLabels.map(label=>{
   const key=autoCompetitionKey(label);
   if(!supportedKeys.has(key))return null;
-  const shortTeams=deficits.filter(item=>autoCompetitionKey(item.competition)===key).flatMap(item=>{
+  const relevantDeficits=deficits.filter(item=>autoCompetitionKey(item.competition)===key);
+  const targetTeams=[...new Set(relevantDeficits.flatMap(item=>{
    const rows=[];
    if(Number(item.home_history_games??minimum)<minimum&&item.home_team)rows.push(item.home_team);
    if(Number(item.away_history_games??minimum)<minimum&&item.away_team)rows.push(item.away_team);
    return rows;
-  });
-  const teamKeys=[...new Set(shortTeams.map(normTeam).filter(Boolean))];
+  }))];
+  const teamKeys=targetTeams.map(normaliseEspnTeam).filter(Boolean);
   const cooldownKeys=teamKeys.length
    ?teamKeys.map(team=>'bea-v20-espn-history:'+key+':team:'+team)
    :['bea-v20-espn-history:'+key];
@@ -762,7 +930,7 @@ async function autoTopUpHistoryForFixtures(analysis){
    const last=Number(localStorage.getItem(storageKey)||0);
    return !last||now-last>12*60*60*1000;
   });
-  return {label,key,cooldownKeys,due};
+  return {label,key,cooldownKeys,targetTeams,due};
  }).filter(item=>item&&item.due).sort((a,b)=>{
   const ah=Number(audit[a.key]?.estimated_games_to_import||999999);
   const bh=Number(audit[b.key]?.estimated_games_to_import||999999);
@@ -770,32 +938,50 @@ async function autoTopUpHistoryForFixtures(analysis){
  });
  const deferred=candidates.slice(2);
  const selected=candidates.slice(0,2);
+ const existingJob=readSavedEspnSyncJob();
+ if(existingJob){
+  const resumed=await runSavedHistorySyncJob();
+  let summary=resumed.summary;
+  if(deferred.length)summary+=' Otras competiciones compatibles pendientes para búsquedas posteriores: '+deferred.map(item=>item.label).join(', ')+'.';
+  if(unsupported.length)summary+=' Sin cobertura ESPN: '+unsupported.join(', ')+'.';
+  return {...resumed,summary};
+ }
  if(!selected.length){
   const deficitText=deficits.length?' Los equipos con muestra corta ya fueron actualizados recientemente o ESPN no puede completar más datos.':'';
   return {teamStatsRows:0,summary:'No se consultó SportAPI.ai. '+(unsupported.length?'ESPN no tiene cobertura pública mapeada para: '+unsupported.join(', ')+'. ':'')+'No hay una actualización ESPN pendiente para las competiciones de esta ventana.'+deficitText};
  }
- const selectedLabels=selected.map(item=>item.label);
- const deficitSummary=deficits.filter(item=>selected.some(selectedItem=>selectedItem.key===autoCompetitionKey(item.competition))).map(item=>{
-  return item.competition+': '+item.home_team+' ('+item.home_history_games+'/'+minimum+') vs '+item.away_team+' ('+item.away_history_games+'/'+minimum+')';
- });
- message.textContent='Completando historial por equipo · ESPN público · '+selectedLabels.join(', ')+'. Solo se guardarán box scores completos.';
- const query=new URLSearchParams({competitions:selectedLabels.join(','),days:'400',max_games_per_league:'220'});
- const data=await providerRequest('/api/espn/history-sync?'+query);
- const merged=await persistEspnHistoryWithoutDuplicates(data);
- // Cool down successful requests even when ESPN returns no new rows; otherwise
- // one short-history fixture could trigger the same full sync on every search.
- for(const item of selected){
-  for(const storageKey of item.cooldownKeys)localStorage.setItem(storageKey,String(now));
- }
- const warnings=(data.warnings||[]).join(' ');
- let summary='Actualización automática sin SportAPI.ai: ESPN consultó '+(data.competitions_supported||[]).join(', ')+
-  ' · partidos nuevos '+merged.gamesAdded+' · duplicados reconciliados '+merged.duplicateGames+
-  ' · registros nuevos de equipo '+merged.statsAdded+'.';
- if(deficitSummary.length)summary+=' Muestra corta detectada: '+deficitSummary.join(' | ')+'.';
+ const days=400,chunkDays=ESPN_SYNC_CHUNK_DAYS;
+ const chunksPerCompetition=Math.ceil(days/chunkDays);
+ const job={
+  version:1,
+  createdAt:new Date().toISOString(),
+  windowEnd:new Date().toISOString().slice(0,10),
+  days,
+  chunkDays,
+  maxGamesPerChunk:ESPN_SYNC_MAX_GAMES,
+  minimumHistoryGames:minimum,
+  competitions:selected.map(item=>({
+   label:item.label,key:item.key,cooldownKeys:item.cooldownKeys,targetTeams:item.targetTeams
+  })),
+  competitionIndex:0,
+  chunkIndex:0,
+  completedChunks:0,
+  totalChunks:selected.length*chunksPerCompetition,
+  gamesAdded:0,
+  duplicateGames:0,
+  teamStatsRowsAdded:0,
+  warnings:[],
+  earlyStoppedCompetitions:[],
+  pendingRange:null,
+  lastError:''
+ };
+ localStorage.setItem(ESPN_SYNC_JOB_KEY,JSON.stringify(job));
+ renderEspnSyncProgress(job);
+ const result=await runSavedHistorySyncJob();
+ let summary=result.summary;
  if(deferred.length)summary+=' Otras competiciones compatibles pendientes para próximas búsquedas: '+deferred.map(item=>item.label).join(', ')+'.';
  if(unsupported.length)summary+=' Sin cobertura ESPN: '+unsupported.join(', ')+'.';
- if(warnings)summary+=' '+warnings;
- return {teamStatsRows:merged.statsAdded,summary};
+ return {...result,summary};
 }
 
 const sportApiFixturesMessage=document.getElementById('sportapi-fixtures-result');
@@ -1136,7 +1322,7 @@ document.getElementById('run-backtest').addEventListener('click',async()=>{
   }catch(e){out.textContent='No se pudo medir: '+e.message;}
   finally{button.disabled=false;button.textContent='Medir acierto real del modelo (backtest)';}
 });
-(async()=>{try{if(!('indexedDB'in window))throw new Error('IndexedDB no está disponible.');db=await openDB();document.getElementById('storage-state').textContent='Almacenamiento local activo';await refresh();}catch(e){document.getElementById('storage-state').textContent='Error de almacenamiento';alert('No se pudo iniciar el almacenamiento local: '+e.message);}})();
+(async()=>{try{if(!('indexedDB'in window))throw new Error('IndexedDB no está disponible.');db=await openDB();document.getElementById('storage-state').textContent='Almacenamiento local activo';await refresh();renderEspnSyncProgress();}catch(e){document.getElementById('storage-state').textContent='Error de almacenamiento';alert('No se pudo iniciar el almacenamiento local: '+e.message);}})();
 if('serviceWorker'in navigator){window.addEventListener('load',()=>navigator.serviceWorker.register('./sw.js').catch(()=>{}));}
 </script>
 </body>

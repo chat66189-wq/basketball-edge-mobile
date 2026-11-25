@@ -107,6 +107,44 @@ class ESPNProviderTests(unittest.TestCase):
         self.assertTrue(any("calendarios mensuales no se pudieron leer" in warning
                             for warning in result["warnings"]))
 
+    def test_sync_accepts_a_bounded_date_chunk_and_excludes_other_dates(self):
+        now = datetime.now(timezone.utc)
+        inside = now - timedelta(days=4)
+        outside = now - timedelta(days=18)
+        included = _event(inside)
+        included["id"] = "included-event"
+        excluded = _event(outside)
+        excluded["id"] = "excluded-event"
+
+        def fake_get(path, params=None, ttl=3600):
+            if path.endswith("/scoreboard"):
+                return {"events": [included, excluded]}
+            if path.endswith("/summary"):
+                return _summary()
+            raise AssertionError(path)
+
+        with patch.object(espn_provider, "_get_json", side_effect=fake_get):
+            result = espn_provider.sync(
+                "NBA",
+                start_date=inside.date().isoformat(),
+                end_date=now.date().isoformat(),
+                max_games_per_league=10,
+            )
+
+        self.assertEqual(result["games_received"], 1)
+        self.assertEqual(result["start_date"], inside.date().isoformat())
+        self.assertEqual(result["end_date"], now.date().isoformat())
+        self.assertEqual(result["games"][0]["event_id"], "espn-included-event")
+
+    def test_sync_rejects_unpaired_or_oversized_date_chunks(self):
+        with self.assertRaises(espn_provider.ESPNError) as unpaired:
+            espn_provider.sync("NBA", start_date="2026-11-01")
+        self.assertEqual(unpaired.exception.status, 422)
+
+        with self.assertRaises(espn_provider.ESPNError) as oversized:
+            espn_provider.sync("NBA", start_date="2026-10-01", end_date="2026-11-01")
+        self.assertEqual(oversized.exception.status, 422)
+
     def test_unsupported_competition_is_not_silently_mapped(self):
         result = espn_provider.sync("EuroLeague", days=10, max_games_per_league=10)
         self.assertEqual(result["games_received"], 0)

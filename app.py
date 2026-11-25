@@ -505,10 +505,14 @@ async def espn_history_sync(
     competitions: str,
     days: int = 400,
     max_games_per_league: int = 220,
+    start_date: str | None = None,
+    end_date: str | None = None,
 ):
     try:
         from espn_provider import sync, ESPNError
-        return await run_in_threadpool(sync, competitions, days, max_games_per_league)
+        return await run_in_threadpool(
+            sync, competitions, days, max_games_per_league, start_date, end_date
+        )
     except Exception as exc:
         from espn_provider import ESPNError
         if isinstance(exc, ESPNError):
