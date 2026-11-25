@@ -1170,7 +1170,7 @@ def games(
     odds_requests_made = 0
     for bookmaker in selected_bookmakers:
         for tournament_group in tournament_groups:
-            response = _get_with_rate_limit_retry(
+            response = _get(
                 "odds-by-tournaments",
                 {
                     "tournamentIds": ",".join(tournament_group),
